@@ -1,14 +1,15 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { HeroSection } from '../components/HeroSection';
 import { SpeciesDiscovery } from '../components/SpeciesDiscovery';
-import { Compass, Globe2, Sparkles, MapPin, Database, ArrowRight, Shield, BarChart3, Layers } from 'lucide-react';
+import { Compass, MapPin, ArrowRight, Shield, BarChart3, Layers, AlertCircle } from 'lucide-react';
 
 interface HomePageProps {
   onSearch: (query: string, country: string) => void;
   isLoading: boolean;
   activeCountry: string;
   onCountryChange: (country: string) => void;
+  errorMessage?: string | null;
 }
 
 export const HomePage: React.FC<HomePageProps> = ({
@@ -16,6 +17,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   isLoading,
   activeCountry,
   onCountryChange,
+  errorMessage,
 }) => {
   const navigate = useNavigate();
 
@@ -30,6 +32,19 @@ export const HomePage: React.FC<HomePageProps> = ({
         isLoading={isLoading}
         activeCountry={activeCountry}
       />
+
+      {/* Search Error / Not Found Alert */}
+      {!isLoading && errorMessage && (
+        <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="p-5 rounded-2xl bg-rose-950/40 border border-rose-700/50 flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <h3 className="text-sm font-bold text-rose-200 mb-0.5">Arama Sonucu Bulunamadı</h3>
+              <p className="text-xs sm:text-sm text-rose-200/90 leading-relaxed">{errorMessage}</p>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Quick Navigation Tile Cards */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -48,7 +63,7 @@ export const HomePage: React.FC<HomePageProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
           {/* Tile 1: Explore */}
           <div 
-            onClick={() => navigate('/kesfet')}
+            onClick={() => navigate(`/kesfet?country=${encodeURIComponent(activeCountry)}`)}
             className="group bg-[#111e17] hover:bg-[#13241b] rounded-3xl p-6 border border-emerald-900/60 hover:border-emerald-500/60 shadow-xl transition-all duration-300 cursor-pointer flex flex-col justify-between"
           >
             <div>
@@ -163,7 +178,6 @@ export const HomePage: React.FC<HomePageProps> = ({
         <SpeciesDiscovery
           onSelectSpecies={(sciName) => {
             onSearch(sciName, activeCountry);
-            navigate('/analiz');
           }}
         />
       </section>

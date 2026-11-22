@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { TaxonGroupExplorer } from '../components/TaxonGroupExplorer';
-import { Search, Compass, Globe2, ArrowRight } from 'lucide-react';
+import { Search, Compass, ArrowRight } from 'lucide-react';
 
 interface ExplorePageProps {
   onSelectSpecies: (scientificName: string, country: string) => void;
@@ -14,18 +14,31 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({
   activeCountry,
   onCountryChange,
 }) => {
-  const [inputQuery, setInputQuery] = useState<string>('Kuş');
-  const [activeQuery, setActiveQuery] = useState<string>('Kuş');
+  const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
+
+  const urlQuery = searchParams.get('q')?.trim() || 'Kuş';
+  const urlCountry = searchParams.get('country');
+  const effectiveCountry = urlCountry !== null ? urlCountry : activeCountry;
+
+  const [inputQuery, setInputQuery] = useState<string>(urlQuery);
+  const [activeQuery, setActiveQuery] = useState<string>(urlQuery);
+
+  useEffect(() => {
+    setInputQuery(urlQuery);
+    setActiveQuery(urlQuery);
+  }, [urlQuery]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (inputQuery.trim()) {
-      setActiveQuery(inputQuery.trim());
+    const clean = inputQuery.trim();
+    if (clean) {
+      setActiveQuery(clean);
+      setSearchParams({ q: clean, country: effectiveCountry });
     }
   };
 
-  const quickGroups = ['Kuş', 'Memeli', 'Böcek', 'Kelebek', 'Balık', 'Yılan', 'Kurbağa', 'Örümcek', 'Tilki', 'Kurt'];
+  const quickGroups = ['Kuş', 'Memeli', 'Böcek', 'Kelebek', 'Balık', 'Yılan', 'Sürüngen', 'Kurbağa', 'Örümcek', 'Tilki', 'Kurt', 'Kedi', 'Ayı', 'Baykuş', 'Yunus'];
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -74,6 +87,7 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({
               onClick={() => {
                 setInputQuery(g);
                 setActiveQuery(g);
+                setSearchParams({ q: g, country: effectiveCountry });
               }}
               className="px-3 py-1 rounded-lg bg-emerald-950/60 hover:bg-emerald-800/50 text-emerald-200 hover:text-white border border-emerald-800/40 transition-colors cursor-pointer"
             >
@@ -86,13 +100,15 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({
       {/* Taxon Group Explorer */}
       <TaxonGroupExplorer
         searchQuery={activeQuery}
-        countryCode={activeCountry}
+        countryCode={effectiveCountry}
         onSelectSpecies={(sciName, country) => {
           onSelectSpecies(sciName, country);
-          navigate('/analiz');
         }}
         onBackToDefault={() => navigate('/')}
-        onCountryChange={onCountryChange}
+        onCountryChange={(nextCountry) => {
+          onCountryChange(nextCountry);
+          setSearchParams({ q: activeQuery, country: nextCountry }, { replace: true });
+        }}
       />
     </div>
   );

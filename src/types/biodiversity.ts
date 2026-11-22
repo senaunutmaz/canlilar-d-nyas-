@@ -190,7 +190,11 @@ export interface TaxonGroupCandidate {
   allowDomestic?: boolean;
   membershipPolicyNote?: string;
   verificationWarning?: string;
+  isParentOverview?: boolean;
+  canDrillDown?: boolean;
 }
+
+export type OccurrenceCountStatus = 'OK' | 'ERROR';
 
 export interface DiscoveredSpeciesItem {
   usageKey: number;
@@ -209,6 +213,9 @@ export interface DiscoveredSpeciesItem {
   turkishName?: string;
   englishName?: string;
   gbifRecordCount: number;
+  gbifRecordStatus?: OccurrenceCountStatus;
+  globalRecordCount?: number;
+  globalRecordStatus?: OccurrenceCountStatus;
   isFossilOnly?: boolean;
   existenceStatus?: SpeciesExistenceStatus;
   existenceEvidence?: string;
@@ -235,6 +242,10 @@ export interface SpeciesDiscoveryPagination {
   page: number;
   pageSize: number;
   totalDiscovered: number;
+  backboneTotalCount?: number;
+  backboneMatchCount?: number;
+  filteredCatalogCount?: number | null;
+  offsetLimitReached?: boolean;
   hasMore: boolean;
   facetOffset: number;
   nextFacetOffset: number | null;
@@ -248,6 +259,8 @@ export interface SpeciesDiscoveryResult {
   activeGroupId?: string;
   species: DiscoveredSpeciesItem[];
   totalOccurrencesInScope: number;
+  occurrenceEnrichmentStatus?: 'OK' | 'PARTIAL_ERROR' | 'ERROR';
+  offsetLimitReached?: boolean;
   pagination: SpeciesDiscoveryPagination;
   uncertainOrHistoricalCount?: number;
   filteredFossilCount?: number;
