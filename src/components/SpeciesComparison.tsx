@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { SpeciesAnalysis } from '../types/biodiversity';
+import { SpeciesAnalysis, SpeciesInfo } from '../types/biodiversity';
 import { matchSpecies } from '../services/gbif';
 import { Scale, AlertCircle, Loader2, Info } from 'lucide-react';
 
@@ -26,12 +26,52 @@ const QUICK_SECONDARY_PRESETS: QuickPreset[] = [
 ];
 
 function isSameTaxon(a: SpeciesAnalysis['species'], b: SpeciesAnalysis['species']): boolean {
-  if (a.usageKey && b.usageKey) {
-    return a.usageKey === b.usageKey;
+  const keyA = (a as any).acceptedUsageKey || a.usageKey;
+  const keyB = (b as any).acceptedUsageKey || b.usageKey;
+  if (keyA && keyB) {
+    return keyA === keyB;
   }
   const canonA = (a.canonicalName || a.scientificName || '').trim().toLowerCase();
   const canonB = (b.canonicalName || b.scientificName || '').trim().toLowerCase();
   return Boolean(canonA && canonB && canonA === canonB);
+}
+
+export type SecondaryValidationStatus = 'VALID' | 'ERROR' | 'NOT_FOUND' | 'DUPLICATE';
+
+export interface SecondaryValidationOutcome {
+  status: SecondaryValidationStatus;
+  message?: string;
+}
+
+export function classifySecondaryMatchValidation(
+  matched: SpeciesInfo | null | undefined,
+  primarySpecies: SpeciesInfo,
+  trimmedQuery: string
+): SecondaryValidationOutcome {
+  if (matched?.matchType === 'ERROR') {
+    return {
+      status: 'ERROR',
+      message:
+        matched.summary ||
+        'GBIF taksonomi veya veri kaynağına şu anda erişilemiyor. Lütfen bağlantınızı kontrol edip tekrar deneyin.',
+    };
+  }
+
+  if (!matched || matched.isMatched === false || !matched.usageKey) {
+    return {
+      status: 'NOT_FOUND',
+      message: `"${trimmedQuery}" için GBIF Backbone taksonomisinde eşleşen ikinci bir canlı türü bulunamadı. Lütfen Türkçe, İngilizce veya bilimsel adını kontrol edip tekrar deneyin.`,
+    };
+  }
+
+  if (isSameTaxon(primarySpecies, matched)) {
+    return {
+      status: 'DUPLICATE',
+      message: `Aynı türü kendisiyle karşılaştıramazsınız (${matched.turkishName || matched.canonicalName}). Lütfen 1. türden farklı bir ikinci tür seçin.`,
+    };
+  }
+
+  return { status: 'VALID' };
 }
 
 export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
@@ -43,6 +83,7 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
   const [customSecondaryQuery, setCustomSecondaryQuery] = useState('');
   const [isValidatingSecondary, setIsValidatingSecondary] = useState(false);
   const [secondaryError, setSecondaryError] = useState<string | null>(null);
+  const [secondaryErrorType, setSecondaryErrorType] = useState<'ERROR' | 'NOT_FOUND' | 'DUPLICATE' | null>(null);
   const [expectedSecondary, setExpectedSecondary] = useState<{
     query: string;
     usageKey?: number;
@@ -57,10 +98,12 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
   // Birinci tür değiştiğinde önceki doğrulama hata mesajını sıfırla (ikinci türü bozmadan)
   useEffect(() => {
     setSecondaryError(null);
+    setSecondaryErrorType(null);
   }, [p.species.usageKey, p.species.scientificName]);
 
-  // App üzerinden gelen secondaryAnalysis sonuçlarını doğrula (eşleşmeme / aynı tür)
-  const hasSecondaryMismatchError = Boolean(s && s.species.isMatched === false);
+  // App üzerinden gelen secondaryAnalysis sonuçlarını doğrula (API hatası / eşleşmeme / aynı tür)
+  const hasSecondaryApiError = Boolean(s && s.species.matchType === 'ERROR');
+  const hasSecondaryMismatchError = Boolean(s && s.species.isMatched === false && !hasSecondaryApiError);
   const isDuplicateSpecies = Boolean(s && s.species.isMatched !== false && isSameTaxon(p.species, s.species));
 
   // Beklenen türle gelen secondaryAnalysis tutarlı mı?
@@ -77,27 +120,34 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
   const handleSelectAndValidateSecondary = async (rawQuery: string) => {
     const trimmed = rawQuery.trim();
     if (!trimmed) {
+      setSecondaryErrorType('NOT_FOUND');
       setSecondaryError('Lütfen karşılaştırılacak ikinci canlı türünün adını girin.');
       return;
     }
 
     setSecondaryError(null);
+    setSecondaryErrorType(null);
     setIsValidatingSecondary(true);
 
     try {
       const matched = await matchSpecies(trimmed);
+      const outcome = classifySecondaryMatchValidation(matched, p.species, trimmed);
 
-      if (!matched || matched.isMatched === false || !matched.usageKey) {
-        setSecondaryError(
-          `"${trimmed}" için GBIF Backbone taksonomisinde eşleşen ikinci bir canlı türü bulunamadı. Lütfen Türkçe, İngilizce veya bilimsel adını kontrol edip tekrar deneyin.`
-        );
+      if (outcome.status === 'ERROR') {
+        setSecondaryErrorType('ERROR');
+        setSecondaryError(outcome.message || 'Veri kaynağına şu anda erişilemiyor.');
         return;
       }
 
-      if (isSameTaxon(p.species, matched)) {
-        setSecondaryError(
-          `Aynı türü kendisiyle karşılaştıramazsınız (${matched.turkishName || matched.canonicalName}). Lütfen 1. türden farklı bir ikinci tür seçin.`
-        );
+      if (outcome.status === 'DUPLICATE') {
+        setSecondaryErrorType('DUPLICATE');
+        setSecondaryError(outcome.message || null);
+        return;
+      }
+
+      if (outcome.status === 'NOT_FOUND') {
+        setSecondaryErrorType('NOT_FOUND');
+        setSecondaryError(outcome.message || null);
         return;
       }
 
@@ -110,8 +160,9 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
       await Promise.resolve(onSelectSecondarySpecies(matched.canonicalName || matched.scientificName));
     } catch (err: any) {
       console.error('Secondary species validation/fetch error:', err);
+      setSecondaryErrorType('ERROR');
       setSecondaryError(
-        err?.message || 'İkinci tür verileri alınırken bir bağlantı hatası oluştu. Lütfen tekrar deneyin.'
+        err?.message || 'İkinci tür verileri alınırken veri kaynağına erişilemedi. Lütfen tekrar deneyin.'
       );
     } finally {
       setIsValidatingSecondary(false);
@@ -196,18 +247,47 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
       </div>
 
       {/* Validation / Fetch Error Notification */}
-      {(secondaryError || hasSecondaryMismatchError) && (
-        <div className="mb-6 p-4 rounded-2xl bg-rose-950/40 border border-rose-700/60 flex items-start gap-3 text-xs text-rose-200">
-          <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
-          <div>
-            <strong className="font-bold text-rose-100 block mb-0.5">İkinci Tür Seçilemedi</strong>
-            <span>
-              {secondaryError ||
-                `"${s?.species.scientificName || ''}" için GBIF Backbone veritabanında geçerli bir ikinci tür eşleşmesi bulunamadı.`}
-            </span>
+      {!isBusy && (secondaryError || hasSecondaryApiError || hasSecondaryMismatchError) && (() => {
+        const isApiErr = secondaryErrorType === 'ERROR' || hasSecondaryApiError;
+        const isDupErr = !isApiErr && secondaryErrorType === 'DUPLICATE';
+        const isWarningTone = isApiErr || isDupErr;
+        const headingText = isApiErr
+          ? 'Veri Kaynağına Erişilemedi'
+          : isDupErr
+            ? 'Aynı Tür Karşılaştırılamaz'
+            : 'İkinci Tür Bulunamadı';
+
+        return (
+          <div
+            className={`mb-6 p-4 rounded-2xl border flex items-start gap-3 text-xs ${
+              isWarningTone
+                ? 'bg-amber-950/40 border-amber-700/60 text-amber-200'
+                : 'bg-rose-950/40 border-rose-700/60 text-rose-200'
+            }`}
+          >
+            <AlertCircle
+              className={`w-5 h-5 shrink-0 mt-0.5 ${
+                isWarningTone ? 'text-amber-400' : 'text-rose-400'
+              }`}
+            />
+            <div>
+              <strong
+                className={`font-bold block mb-0.5 ${
+                  isWarningTone ? 'text-amber-100' : 'text-rose-100'
+                }`}
+              >
+                {headingText}
+              </strong>
+              <span>
+                {secondaryError ||
+                  (hasSecondaryApiError
+                    ? s?.species.summary || 'GBIF taksonomi veya veri kaynağına şu anda erişilemiyor. Lütfen tekrar deneyin.'
+                    : `"${s?.species.scientificName || ''}" için GBIF Backbone veritabanında geçerli bir ikinci tür eşleşmesi bulunamadı.`)}
+              </span>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Same Species Conflict Warning */}
       {isDuplicateSpecies && !secondaryError && (
@@ -343,12 +423,6 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
               {!isExpectedMatch && (
                 <div className="mt-3 px-3 py-2 rounded-lg bg-amber-950/50 border border-amber-700/40 text-[11px] text-amber-200">
                   Not: Gösterilen tür mevcut yüklü ikinci türdür; son aramanız bekleniyor.
-                </div>
-              )}
-
-              {validSecondary.totalRecords === 0 && (
-                <div className="mt-3 px-3 py-2 rounded-lg bg-amber-950/50 border border-amber-700/40 text-[11px] text-amber-200">
-                  {validSecondary.countryName} kapsamında bu tür için GBIF gözlem kaydı bulunamadı.
                 </div>
               )}
 

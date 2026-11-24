@@ -2,13 +2,16 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   resolveSearchIntent, 
   discoverSpeciesByGroup,
-  expandTaxonCandidateToSubgroups,
-  enrichSubgroupLabels
+  expandTaxonCandidateToSubgroupsPaged,
+  enrichSubgroupLabels,
+  TaxonSubgroupExpansionResult
 } from '../services/gbif';
 import { 
   TaxonGroupCandidate, 
   DiscoveredSpeciesItem, 
-  SpeciesDiscoveryResult 
+  SpeciesDiscoveryResult,
+  SearchErrorType,
+  SubgroupPaginationMeta
 } from '../types/biodiversity';
 import { 
   Compass, 
@@ -42,11 +45,13 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
   const [isLoadingIntent, setIsLoadingIntent] = useState<boolean>(true);
   const [isLoadingSpecies, setIsLoadingSpecies] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorType, setErrorType] = useState<SearchErrorType | null>(null);
 
   const [groups, setGroups] = useState<TaxonGroupCandidate[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string>('');
+  const [subgroupMeta, setSubgroupMeta] = useState<SubgroupPaginationMeta | null>(null);
   const [discoveryResult, setDiscoveryResult] = useState<SpeciesDiscoveryResult | null>(null);
-  const [drillStack, setDrillStack] = useState<Array<{ label: string; groups: TaxonGroupCandidate[]; activeGroupId: string }>>([]);
+  const [drillStack, setDrillStack] = useState<Array<{ label: string; groups: TaxonGroupCandidate[]; activeGroupId: string; subgroupMeta: SubgroupPaginationMeta | null }>>([]);
   const [isDrillingDown, setIsDrillingDown] = useState<boolean>(false);
   
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -77,7 +82,9 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
     subgroupSeqRef.current++;
     setIsLoadingIntent(true);
     setErrorMessage(null);
+    setErrorType(null);
     setDiscoveryResult(null);
+    setSubgroupMeta(null);
     setVisibleSubgroupCount(16);
     try {
       const intent = await resolveSearchIntent(query, cc);
@@ -85,6 +92,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
 
       if (intent.mode === 'TAXON_GROUP_DISCOVERY' && intent.groups && intent.groups.length > 0) {
         setGroups(intent.groups);
+        setSubgroupMeta(intent.subgroupPagination ?? null);
         const firstId = intent.activeGroupId || intent.groups[0].id;
         setActiveGroupId(firstId);
         await loadSpeciesForGroup(intent.groups, firstId, cc, 1, includeFossil, seq);
@@ -93,13 +101,16 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
         onSelectSpecies(intent.matchedSpecies.canonicalName || intent.matchedSpecies.scientificName, cc);
       } else {
         setGroups([]);
+        setSubgroupMeta(null);
         setDiscoveryResult(null);
+        setErrorType('NOT_FOUND');
         setErrorMessage(intent.reason || `"${query}" araması için Animalia alemi içinde doğrulanmış bir taksonomik grup bulunamadı.`);
         setIsLoadingIntent(false);
       }
     } catch (err) {
       if (seq !== requestSeqRef.current) return;
       console.error('Taxon intent error:', err);
+      setErrorType('ERROR');
       setErrorMessage('GBIF Backbone taksonomi servislerine bağlanırken bir hata oluştu.');
       setIsLoadingIntent(false);
     }
@@ -115,6 +126,8 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
   ) => {
     const seq = existingSeq ?? ++requestSeqRef.current;
     setIsLoadingSpecies(true);
+    setErrorMessage(null);
+    setErrorType(null);
     try {
       const res = await discoverSpeciesByGroup(targetGroups, {
         countryCode: cc,
@@ -131,6 +144,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
     } catch (err) {
       if (seq !== requestSeqRef.current) return;
       console.error('Species discovery load error:', err);
+      setErrorType('ERROR');
       setErrorMessage('Tür keşif listesi yüklenirken bir hata oluştu.');
     } finally {
       if (seq === requestSeqRef.current) {
@@ -150,19 +164,25 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
     const seq = ++requestSeqRef.current;
     setIsDrillingDown(true);
     try {
-      const nextGroups = await expandTaxonCandidateToSubgroups(group, currentCountry);
+      const expanded = await expandTaxonCandidateToSubgroupsPaged(group, { countryCode: currentCountry });
       if (seq !== requestSeqRef.current) return;
-      if (nextGroups.length > 1) {
+      if (expanded.groups.length > 1) {
         setDrillStack((prev) => [
           ...prev,
-          { label: prev.length === 0 ? searchQuery : (groups[0]?.label || searchQuery), groups, activeGroupId },
+          {
+            label: prev.length === 0 ? searchQuery : (groups[0]?.label || searchQuery),
+            groups,
+            activeGroupId,
+            subgroupMeta,
+          },
         ]);
         subgroupSeqRef.current++;
-        setGroups(nextGroups);
+        setGroups(expanded.groups);
+        setSubgroupMeta(expanded.pagination);
         setVisibleSubgroupCount(16);
-        const firstId = nextGroups[0].id;
+        const firstId = expanded.groups[0].id;
         setActiveGroupId(firstId);
-        await loadSpeciesForGroup(nextGroups, firstId, currentCountry, 1, includeFossil, seq);
+        await loadSpeciesForGroup(expanded.groups, firstId, currentCountry, 1, includeFossil, seq);
       }
     } catch (err) {
       console.error('Subgroup drill-down error:', err);
@@ -179,27 +199,65 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
     subgroupSeqRef.current++;
     setDrillStack((prev) => prev.slice(0, targetIndex));
     setGroups(target.groups);
+    setSubgroupMeta(target.subgroupMeta);
     setVisibleSubgroupCount(16);
     setActiveGroupId(target.activeGroupId);
     loadSpeciesForGroup(target.groups, target.activeGroupId, currentCountry, 1, includeFossil);
   };
 
   const handleRevealMoreSubgroups = async (showAll = false) => {
-    if (isLoadingMoreSubgroups || visibleSubgroupCount >= groups.length) return;
-    const startIdx = visibleSubgroupCount;
-    const nextCount = showAll ? groups.length : Math.min(groups.length, visibleSubgroupCount + 16);
-    setVisibleSubgroupCount(nextCount);
+    if (isLoadingMoreSubgroups) return;
+    const needsRemoteFetch = Boolean(subgroupMeta?.hasMore) && (showAll || visibleSubgroupCount + 16 > groups.length);
+    if (!needsRemoteFetch && visibleSubgroupCount >= groups.length) return;
 
     const subSeq = ++subgroupSeqRef.current;
+    const startIdx = visibleSubgroupCount;
     setIsLoadingMoreSubgroups(true);
+
     try {
-      const batchSize = Math.min(24, nextCount - startIdx);
-      const enriched = await enrichSubgroupLabels(groups, startIdx, batchSize);
-      if (subSeq === subgroupSeqRef.current) {
-        setGroups(enriched);
+      let workingGroups = groups;
+      if (needsRemoteFetch && subgroupMeta) {
+        const existingExpanded: TaxonSubgroupExpansionResult = {
+          groups: workingGroups.filter((g) => g.isParentOverview || g.id.startsWith('dyn-sub-')),
+          pagination: subgroupMeta,
+        };
+        const fetched = await expandTaxonCandidateToSubgroupsPaged(subgroupMeta.parentGroup, {
+          countryCode: currentCountry,
+          existingResult: existingExpanded,
+          fetchAll: showAll,
+          maxPagesPerBatch: 1,
+        });
+        if (subSeq !== subgroupSeqRef.current) return;
+
+        // Varsa ikincil üst grup adaylarını (dyn-sub-* olmayanlar) sonuna koruyarak ekle
+        const seenIds = new Set(fetched.groups.map((g) => g.id));
+        const seenKeys = new Set(
+          fetched.groups
+            .map((g) => g.acceptedUsageKey || g.taxonKeys?.[0])
+            .filter((k): k is number => typeof k === 'number')
+        );
+        const trailingExtras = workingGroups.filter((g) => {
+          if (g.isParentOverview || g.id.startsWith('dyn-sub-') || seenIds.has(g.id)) return false;
+          const k = g.acceptedUsageKey || g.taxonKeys?.[0];
+          return !k || !seenKeys.has(k);
+        });
+        workingGroups = [...fetched.groups, ...trailingExtras];
+        setGroups(workingGroups);
+        setSubgroupMeta(fetched.pagination);
+      }
+
+      const nextCount = showAll ? workingGroups.length : Math.min(workingGroups.length, startIdx + 16);
+      setVisibleSubgroupCount(nextCount);
+
+      const batchSize = Math.min(16, Math.max(0, nextCount - startIdx));
+      if (batchSize > 0) {
+        const enriched = await enrichSubgroupLabels(workingGroups, startIdx, batchSize);
+        if (subSeq === subgroupSeqRef.current) {
+          setGroups(enriched);
+        }
       }
     } catch (err) {
-      console.warn('Subgroup label enrichment warning:', err);
+      console.warn('Subgroup pagination/label warning:', err);
     } finally {
       if (subSeq === subgroupSeqRef.current) {
         setIsLoadingMoreSubgroups(false);
@@ -244,6 +302,12 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
     );
   };
 
+  const hasLivingSubgroups = groups.some((g) => !g.isParentOverview && !g.isExtinct);
+  const displayGroups =
+    !includeFossil && hasLivingSubgroups
+      ? groups.filter((g) => g.isParentOverview || !g.isExtinct || g.id === activeGroupId)
+      : groups;
+  const hiddenExtinctSubgroupCount = Math.max(0, groups.length - displayGroups.length);
   const activeGroupCandidate = groups.find(g => g.id === activeGroupId) || groups[0];
 
   return (
@@ -329,7 +393,17 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
               <div className="flex items-center gap-2 text-xs font-semibold text-emerald-300/80">
                 <Layers className="w-4 h-4 text-emerald-400" />
-                <span>Doğrulanmış Alt Gruplar ({groups.length}):</span>
+                <span>
+                  {subgroupMeta?.hasMore
+                    ? `Doğrulanmış Alt Gruplar (${displayGroups.length}+ yüklendi${
+                        subgroupMeta.totalMatchedCount
+                          ? ` / ~${subgroupMeta.totalMatchedCount.toLocaleString('tr-TR')} GBIF kaydı`
+                          : ', devamı var'
+                      }):`
+                    : subgroupMeta?.offsetLimitReached
+                      ? `Doğrulanmış Alt Gruplar (${displayGroups.length}+ · 100.000 GBIF sınırı):`
+                      : `Doğrulanmış Alt Gruplar (${displayGroups.length}):`}
+                </span>
               </div>
 
               {activeGroupCandidate?.canDrillDown && !activeGroupCandidate?.isParentOverview && (
@@ -347,7 +421,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
             </div>
 
             <div className="flex items-center gap-2.5 overflow-x-auto pb-2 scrollbar-none">
-              {groups.slice(0, visibleSubgroupCount).map((g) => {
+              {displayGroups.slice(0, visibleSubgroupCount).map((g) => {
                 const isActive = g.id === activeGroupId;
                 return (
                   <button
@@ -361,6 +435,13 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                     }`}
                   >
                     <span>{g.label}</span>
+                    {g.isExtinct && (
+                      <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
+                        isActive ? 'bg-[#0b1510]/20 text-[#0b1510]' : 'bg-rose-950/80 text-rose-300 border border-rose-700/40'
+                      }`}>
+                        FOSİL
+                      </span>
+                    )}
                     {g.scientificName && !g.label.includes(g.scientificName) && (
                       <span className={`text-[10px] italic font-serif px-1.5 py-0.5 rounded ${
                         isActive ? 'bg-[#0b1510]/20 text-[#0b1510]' : 'bg-emerald-950 text-emerald-400'
@@ -372,7 +453,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                 );
               })}
 
-              {groups.length > visibleSubgroupCount && (
+              {(displayGroups.length > visibleSubgroupCount || Boolean(subgroupMeta?.hasMore)) && (
                 <>
                   <button
                     type="button"
@@ -381,21 +462,57 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                     className="px-3.5 py-2.5 rounded-xl text-xs font-semibold whitespace-nowrap bg-emerald-950/90 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
                   >
                     <ChevronDown className="w-3.5 h-3.5" />
-                    <span>Daha Fazla (+{Math.min(16, groups.length - visibleSubgroupCount)})</span>
+                    <span>
+                      {isLoadingMoreSubgroups
+                        ? 'Yükleniyor...'
+                        : displayGroups.length > visibleSubgroupCount
+                          ? `Daha Fazla (+${Math.min(16, displayGroups.length - visibleSubgroupCount)})`
+                          : 'Daha Fazla Yükle (+)'}
+                    </span>
                   </button>
-                  {groups.length - visibleSubgroupCount > 16 && (
+                  {(displayGroups.length - visibleSubgroupCount > 16 || Boolean(subgroupMeta?.hasMore)) && (
                     <button
                       type="button"
                       disabled={isLoadingMoreSubgroups}
                       onClick={() => handleRevealMoreSubgroups(true)}
                       className="px-3.5 py-2.5 rounded-xl text-xs font-medium whitespace-nowrap bg-[#0b1510] hover:bg-[#13241b] text-emerald-300/80 hover:text-white border border-emerald-800/60 transition-colors cursor-pointer disabled:opacity-60"
                     >
-                      Tümünü Göster ({groups.length})
+                      {isLoadingMoreSubgroups
+                        ? 'Eksik Alt Gruplar Getiriliyor...'
+                        : subgroupMeta?.hasMore
+                          ? subgroupMeta.totalMatchedCount
+                            ? `Tümünü Göster (~${subgroupMeta.totalMatchedCount.toLocaleString('tr-TR')})`
+                            : `Tümünü Göster (${displayGroups.length}+)`
+                          : `Tümünü Göster (${displayGroups.length})`}
                     </button>
                   )}
                 </>
               )}
             </div>
+
+            {(subgroupMeta?.hasMore || subgroupMeta?.hasError || subgroupMeta?.offsetLimitReached || hiddenExtinctSubgroupCount > 0) && (
+              <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-200/90 bg-amber-950/30 border border-amber-800/40 rounded-xl px-3.5 py-2">
+                <span>
+                  {subgroupMeta?.hasError
+                    ? `Alt grup listesi GBIF hatası nedeniyle eksik kaldı (${subgroupMeta.errorMessage || 'geçici sunucu hatası'}).`
+                    : subgroupMeta?.offsetLimitReached
+                      ? 'GBIF Backbone /v1/species/search 100.000 kayıt sınırına ulaşıldığı için sonraki alt gruplar listelenemedi.'
+                      : subgroupMeta?.hasMore
+                        ? `GBIF Backbone üzerinde devam eden alt gruplar bulunuyor (şu ana kadar ${groups.length} grup yüklendi; eksik olanları getirmek için "Tümünü Göster"i kullanabilirsiniz).`
+                        : `${hiddenExtinctSubgroupCount} fosil/soyu tükenmiş alt grup katalogda korundu (görmek için "Fosil / Soyu Tükenmişleri de Göster" seçeneğini açabilirsiniz).`}
+                </span>
+                {subgroupMeta?.hasError && (
+                  <button
+                    type="button"
+                    disabled={isLoadingMoreSubgroups}
+                    onClick={() => handleRevealMoreSubgroups(false)}
+                    className="px-2.5 py-1 rounded-lg bg-amber-800/70 hover:bg-amber-700 text-white font-semibold cursor-pointer disabled:opacity-50"
+                  >
+                    Tekrar Dene
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -415,14 +532,36 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
           </p>
         </div>
       ) : errorMessage && !discoveryResult ? (
-        <div className="p-8 rounded-3xl bg-rose-950/40 border border-rose-700/50 flex flex-col items-center justify-center text-center">
-          <AlertCircle className="w-12 h-12 text-rose-400 mb-3" />
-          <h3 className="text-lg font-bold text-rose-200 mb-1">Grup Keşif Hatası</h3>
-          <p className="text-sm text-rose-200/90 max-w-md mb-6">{errorMessage}</p>
+        <div
+          className={`p-8 rounded-3xl border flex flex-col items-center justify-center text-center ${
+            errorType === 'ERROR'
+              ? 'bg-amber-950/40 border-amber-700/50'
+              : 'bg-rose-950/40 border-rose-700/50'
+          }`}
+        >
+          <AlertCircle
+            className={`w-12 h-12 mb-3 ${errorType === 'ERROR' ? 'text-amber-400' : 'text-rose-400'}`}
+          />
+          <h3
+            className={`text-lg font-bold mb-1 ${
+              errorType === 'ERROR' ? 'text-amber-200' : 'text-rose-200'
+            }`}
+          >
+            {errorType === 'ERROR' ? 'Veri Kaynağına Erişilemedi' : 'Sonuç Bulunamadı'}
+          </h3>
+          <p
+            className={`text-sm max-w-md mb-6 ${
+              errorType === 'ERROR' ? 'text-amber-200/90' : 'text-rose-200/90'
+            }`}
+          >
+            {errorMessage}
+          </p>
           <button
             type="button"
             onClick={onBackToDefault}
-            className="px-5 py-2.5 bg-rose-900/60 hover:bg-rose-800 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+            className={`px-5 py-2.5 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+              errorType === 'ERROR' ? 'bg-amber-800/70 hover:bg-amber-700/80' : 'bg-rose-900/60 hover:bg-rose-800'
+            }`}
           >
             Ana Sayfaya Dön
           </button>
@@ -587,6 +726,23 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                 </div>
               ))}
             </div>
+          ) : discoveryResult?.catalogErrorMessage ? (
+            <div className="py-16 px-6 flex flex-col items-center justify-center text-center bg-amber-950/25 rounded-2xl border border-amber-700/50">
+              <AlertCircle className="w-10 h-10 text-amber-400 mb-3" />
+              <h4 className="text-base font-bold text-amber-200 mb-1">
+                Veri Kaynağına Erişilemedi
+              </h4>
+              <p className="text-xs text-amber-200/85 max-w-md mb-4">
+                {discoveryResult.catalogErrorMessage}
+              </p>
+              <button
+                type="button"
+                onClick={() => handlePageChange(currentPage)}
+                className="px-4 py-2 bg-amber-800/70 hover:bg-amber-700 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Tekrar Dene
+              </button>
+            </div>
           ) : (
             <div className="py-20 flex flex-col items-center justify-center text-center bg-[#111e17]/40 rounded-2xl border border-emerald-900/40">
               <HelpCircle className="w-10 h-10 text-emerald-400/60 mb-3" />
@@ -615,6 +771,14 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                   </button>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* Catalog Server / Request Error Notice (distinct from 100k offset limit) */}
+          {discoveryResult?.catalogErrorMessage && discoveryResult.species.length > 0 && (
+            <div className="p-3.5 rounded-xl bg-rose-950/40 border border-rose-700/50 text-xs text-rose-200 flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <span>{discoveryResult.catalogErrorMessage}</span>
             </div>
           )}
 

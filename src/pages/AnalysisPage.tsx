@@ -3,7 +3,7 @@ import { SpeciesOverview } from '../components/SpeciesOverview';
 import { YearlyAnalysisChart } from '../components/YearlyAnalysisChart';
 import { RegionalDistribution } from '../components/RegionalDistribution';
 import { RecordDetailTable } from '../components/RecordDetailTable';
-import { SpeciesAnalysis } from '../types/biodiversity';
+import { SpeciesAnalysis, SearchErrorType } from '../types/biodiversity';
 import { BarChart3, Search, AlertCircle, Compass } from 'lucide-react';
 
 interface AnalysisPageProps {
@@ -13,6 +13,7 @@ interface AnalysisPageProps {
   isLoading: boolean;
   onCountryChange: (country: string) => void;
   errorMessage?: string | null;
+  errorType?: SearchErrorType | null;
 }
 
 export const AnalysisPage: React.FC<AnalysisPageProps> = ({
@@ -22,8 +23,10 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
   isLoading,
   onCountryChange,
   errorMessage,
+  errorType,
 }) => {
   const [searchInput, setSearchInput] = useState<string>('');
+  const isApiError = errorType === 'ERROR';
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -120,43 +123,42 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
           </p>
         </div>
       ) : errorMessage ? (
-        <div className="p-6 rounded-2xl bg-rose-950/40 border border-rose-700/50 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div
+          className={`p-6 rounded-2xl border flex flex-col sm:flex-row items-center justify-between gap-4 ${
+            isApiError
+              ? 'bg-amber-950/40 border-amber-700/50'
+              : 'bg-rose-950/40 border-rose-700/50'
+          }`}
+        >
           <div className="flex items-center gap-3">
-            <AlertCircle className="w-6 h-6 text-rose-400 shrink-0" />
+            <AlertCircle
+              className={`w-6 h-6 shrink-0 ${isApiError ? 'text-amber-400' : 'text-rose-400'}`}
+            />
             <div>
-              <h3 className="text-sm font-bold text-rose-200 mb-0.5">Tür Eşleşmesi Bulunamadı</h3>
-              <p className="text-sm text-rose-200/90">{errorMessage}</p>
+              <h3
+                className={`text-sm font-bold mb-0.5 ${
+                  isApiError ? 'text-amber-200' : 'text-rose-200'
+                }`}
+              >
+                {isApiError ? 'Veri Kaynağına Erişilemedi' : 'Sonuç Bulunamadı'}
+              </h3>
+              <p className={`text-sm ${isApiError ? 'text-amber-200/90' : 'text-rose-200/90'}`}>
+                {errorMessage}
+              </p>
             </div>
           </div>
           <button
             type="button"
             onClick={() => onSearch('Ursus arctos', activeCountry)}
-            className="px-4 py-2 bg-rose-900/60 hover:bg-rose-800/60 text-white rounded-xl text-xs font-semibold transition-colors shrink-0 cursor-pointer"
+            className={`px-4 py-2 text-white rounded-xl text-xs font-semibold transition-colors shrink-0 cursor-pointer ${
+              isApiError ? 'bg-amber-800/70 hover:bg-amber-700/80' : 'bg-rose-900/60 hover:bg-rose-800/60'
+            }`}
           >
             Bozayı Kaydını Yükle
           </button>
         </div>
       ) : primaryAnalysis ? (
         <div className="space-y-8">
-          {/* Zero Record Notice for TR */}
-          {primaryAnalysis.totalRecords === 0 && primaryAnalysis.countryCode === 'TR' && (
-            <div className="p-5 rounded-2xl bg-amber-950/35 border border-amber-700/50 flex flex-col sm:flex-row items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
-                <p className="text-sm text-amber-100">
-                  <strong>{primaryAnalysis.species.turkishName || primaryAnalysis.species.scientificName}</strong> için Türkiye (TR) sınırları içinde GBIF gözlem kaydı bulunamadı.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => onCountryChange('')}
-                className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-[#0b1510] rounded-xl text-xs font-bold transition-colors shrink-0 cursor-pointer"
-              >
-                Tüm Dünya (Global) Kayıtlarını Göster
-              </button>
-            </div>
-          )}
-
           {/* Overview Card */}
           <SpeciesOverview analysis={primaryAnalysis} />
 

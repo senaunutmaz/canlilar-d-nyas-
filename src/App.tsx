@@ -15,7 +15,7 @@ import { ComparePage } from './pages/ComparePage';
 import { ConservationPage } from './pages/ConservationPage';
 
 import { fetchSpeciesAnalysis, resolveSearchIntent } from './services/gbif';
-import { SpeciesAnalysis } from './types/biodiversity';
+import { SpeciesAnalysis, SearchErrorType } from './types/biodiversity';
 
 const STORAGE_SPECIES_KEY = 'canli_atlasi_species';
 const STORAGE_COUNTRY_KEY = 'canli_atlasi_country';
@@ -57,6 +57,7 @@ function MainRouter() {
   const [activeCountry, setActiveCountry] = useState<string>(() => readStoredValue(STORAGE_COUNTRY_KEY, 'TR'));
   const [lastSpeciesName, setLastSpeciesName] = useState<string>(() => readStoredValue(STORAGE_SPECIES_KEY, 'Ursus arctos'));
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorType, setErrorType] = useState<SearchErrorType | null>(null);
 
   // Race condition prevention sequence counter and active request key
   const searchSeqRef = useRef(0);
@@ -128,6 +129,7 @@ function MainRouter() {
 
     setIsLoading(true);
     setErrorMessage(null);
+    setErrorType(null);
     setActiveCountry(country);
     setPrimaryAnalysis(null);
 
@@ -147,6 +149,7 @@ function MainRouter() {
       if (intent.mode === 'NOT_FOUND') {
         inFlightKeyRef.current = null;
         setPrimaryAnalysis(null);
+        setErrorType('NOT_FOUND');
         setErrorMessage(
           intent.reason ||
             `"${cleanQuery}" için GBIF Backbone taksonomisinde eşleşen bir canlı türü veya hayvan grubu bulunamadı. Lütfen Türkçe, İngilizce veya bilimsel adını kontrol edip tekrar deneyin.`
@@ -167,6 +170,7 @@ function MainRouter() {
       if (!data || data.species.isMatched === false) {
         inFlightKeyRef.current = null;
         setPrimaryAnalysis(null);
+        setErrorType(data?.species?.matchType === 'ERROR' ? 'ERROR' : 'NOT_FOUND');
         setErrorMessage(
           data?.species?.summary ||
             `"${cleanQuery}" için GBIF Backbone taksonomisinde eşleşen bir canlı türü bulunamadı. Lütfen Türkçe, İngilizce veya bilimsel adını kontrol edin.`
@@ -210,6 +214,7 @@ function MainRouter() {
       inFlightKeyRef.current = null;
       console.error('Search error:', err);
       setPrimaryAnalysis(null);
+      setErrorType('ERROR');
       setErrorMessage('GBIF sunucularına bağlanırken bir hata oluştu. Lütfen internet bağlantınızı kontrol edip tekrar deneyin.');
     } finally {
       if (currentSeq === searchSeqRef.current) {
@@ -242,6 +247,7 @@ function MainRouter() {
       setSecondaryAnalysis(data);
     } catch (err) {
       console.error('Secondary species error:', err);
+      throw err;
     } finally {
       setIsLoadingSecondary(false);
     }
@@ -263,6 +269,9 @@ function MainRouter() {
     primaryAnalysis?.species?.canonicalName ||
     primaryAnalysis?.species?.scientificName ||
     lastSpeciesName;
+
+  const isInitialAutoLoading = isSpeciesViewRoute && !primaryAnalysis && !errorMessage;
+  const effectiveSpeciesViewLoading = isLoading || isInitialAutoLoading;
 
   return (
     <div className="min-h-screen bg-[#0b1510] text-[#e8f0ec] flex flex-col font-sans selection:bg-emerald-600 selection:text-white">
@@ -288,6 +297,7 @@ function MainRouter() {
                 activeCountry={activeCountry}
                 onCountryChange={handleCountryChange}
                 errorMessage={errorMessage}
+                errorType={errorType}
               />
             }
           />
@@ -313,9 +323,10 @@ function MainRouter() {
                 primaryAnalysis={primaryAnalysis}
                 activeCountry={activeCountry}
                 onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: false })}
-                isLoading={isLoading}
+                isLoading={effectiveSpeciesViewLoading}
                 onCountryChange={handleCountryChange}
                 errorMessage={errorMessage}
+                errorType={errorType}
               />
             }
           />
@@ -326,9 +337,10 @@ function MainRouter() {
                 primaryAnalysis={primaryAnalysis}
                 activeCountry={activeCountry}
                 onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: false })}
-                isLoading={isLoading}
+                isLoading={effectiveSpeciesViewLoading}
                 onCountryChange={handleCountryChange}
                 errorMessage={errorMessage}
+                errorType={errorType}
               />
             }
           />
@@ -340,6 +352,9 @@ function MainRouter() {
                 secondaryAnalysis={secondaryAnalysis}
                 onSelectSecondarySpecies={handleSelectSecondary}
                 isLoadingSecondary={isLoadingSecondary}
+                isLoading={effectiveSpeciesViewLoading}
+                errorMessage={errorMessage}
+                errorType={errorType}
                 onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: false })}
                 activeCountry={activeCountry}
               />
@@ -358,6 +373,7 @@ function MainRouter() {
                 activeCountry={activeCountry}
                 onCountryChange={handleCountryChange}
                 errorMessage={errorMessage}
+                errorType={errorType}
               />
             }
           />

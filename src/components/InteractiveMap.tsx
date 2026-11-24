@@ -458,11 +458,11 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
           <div className="absolute inset-0 z-[450] bg-[#0b1510]/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center pointer-events-none">
             <div className="p-4 rounded-2xl bg-emerald-950/90 border border-emerald-700/50 max-w-md shadow-2xl">
               <MapPin className="w-8 h-8 text-amber-400 mx-auto mb-2" />
-              <h4 className="text-sm font-bold text-white mb-1">Doğrulanmış GPS Koordinatı Bulunmuyor</h4>
+              <h4 className="text-sm font-bold text-white mb-1">
+                Doğrulanmış GPS Koordinatı Bulunmuyor
+              </h4>
               <p className="text-xs text-emerald-200/80 leading-relaxed mb-3">
-                {totalRecords === 0
-                  ? 'Seçilen ülke veya filtre kapsamında GBIF arşivinde gözlem kaydı bulunamadı.'
-                  : `Bu canlı türü için incelenen ${occurrences.length.toLocaleString('tr-TR')} örneklem kaydında (arşiv toplamı: ${totalRecords.toLocaleString('tr-TR')}) haritada gösterilebilir GPS koordinatı bulunmamaktadır. Dağılımı incelemek için yukarıdaki Bölgesel Dağılım bölümüne göz atabilirsiniz.`}
+                Bu tür için haritada gösterilebilecek konum verisi bulunmuyor.
               </p>
               <div className="text-[11px] font-mono text-emerald-400">
                 Bilimsel dürüstlük gereği konumu belirsiz kayıtlar için temsili veya sahte nokta üretilmez.

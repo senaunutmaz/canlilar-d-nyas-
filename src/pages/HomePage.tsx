@@ -2,6 +2,7 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { HeroSection } from '../components/HeroSection';
 import { SpeciesDiscovery } from '../components/SpeciesDiscovery';
+import { SearchErrorType } from '../types/biodiversity';
 import { Compass, MapPin, ArrowRight, Shield, BarChart3, Layers, AlertCircle } from 'lucide-react';
 
 interface HomePageProps {
@@ -10,6 +11,7 @@ interface HomePageProps {
   activeCountry: string;
   onCountryChange: (country: string) => void;
   errorMessage?: string | null;
+  errorType?: SearchErrorType | null;
 }
 
 export const HomePage: React.FC<HomePageProps> = ({
@@ -18,8 +20,10 @@ export const HomePage: React.FC<HomePageProps> = ({
   activeCountry,
   onCountryChange,
   errorMessage,
+  errorType,
 }) => {
   const navigate = useNavigate();
+  const isApiError = errorType === 'ERROR';
 
   return (
     <div className="space-y-12">
@@ -36,11 +40,31 @@ export const HomePage: React.FC<HomePageProps> = ({
       {/* Search Error / Not Found Alert */}
       {!isLoading && errorMessage && (
         <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="p-5 rounded-2xl bg-rose-950/40 border border-rose-700/50 flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+          <div
+            className={`p-5 rounded-2xl border flex items-start gap-3 ${
+              isApiError
+                ? 'bg-amber-950/40 border-amber-700/50'
+                : 'bg-rose-950/40 border-rose-700/50'
+            }`}
+          >
+            <AlertCircle
+              className={`w-5 h-5 shrink-0 mt-0.5 ${isApiError ? 'text-amber-400' : 'text-rose-400'}`}
+            />
             <div>
-              <h3 className="text-sm font-bold text-rose-200 mb-0.5">Arama Sonucu Bulunamadı</h3>
-              <p className="text-xs sm:text-sm text-rose-200/90 leading-relaxed">{errorMessage}</p>
+              <h3
+                className={`text-sm font-bold mb-0.5 ${
+                  isApiError ? 'text-amber-200' : 'text-rose-200'
+                }`}
+              >
+                {isApiError ? 'Veri Kaynağına Erişilemedi' : 'Sonuç Bulunamadı'}
+              </h3>
+              <p
+                className={`text-xs sm:text-sm leading-relaxed ${
+                  isApiError ? 'text-amber-200/90' : 'text-rose-200/90'
+                }`}
+              >
+                {errorMessage}
+              </p>
             </div>
           </div>
         </section>

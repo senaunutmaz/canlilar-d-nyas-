@@ -153,6 +153,8 @@ export type SearchResolutionMode =
   | 'TAXON_GROUP_DISCOVERY'
   | 'NOT_FOUND';
 
+export type SearchErrorType = 'NOT_FOUND' | 'ERROR';
+
 export type SpeciesExistenceStatus =
   | 'LIVING'
   | 'FOSSIL_OR_EXTINCT'
@@ -192,6 +194,29 @@ export interface TaxonGroupCandidate {
   verificationWarning?: string;
   isParentOverview?: boolean;
   canDrillDown?: boolean;
+  isExtinct?: boolean;
+}
+
+export interface SubgroupMemberCursor {
+  memberKey: number;
+  targetRank: string;
+  nextOffset: number;
+  endOfRecords: boolean;
+  apiTotalCount: number | null;
+  hitOffsetLimit: boolean;
+  hasError: boolean;
+  errorMessage?: string;
+}
+
+export interface SubgroupPaginationMeta {
+  parentGroup: TaxonGroupCandidate;
+  hasMore: boolean;
+  loadedCount: number;
+  totalMatchedCount: number | null;
+  offsetLimitReached: boolean;
+  hasError: boolean;
+  errorMessage?: string;
+  cursors: SubgroupMemberCursor[];
 }
 
 export type OccurrenceCountStatus = 'OK' | 'ERROR';
@@ -246,6 +271,7 @@ export interface SpeciesDiscoveryPagination {
   backboneMatchCount?: number;
   filteredCatalogCount?: number | null;
   offsetLimitReached?: boolean;
+  serverErrorReached?: boolean;
   hasMore: boolean;
   facetOffset: number;
   nextFacetOffset: number | null;
@@ -258,9 +284,13 @@ export interface SpeciesDiscoveryResult {
   groups: TaxonGroupCandidate[];
   activeGroupId?: string;
   species: DiscoveredSpeciesItem[];
-  totalOccurrencesInScope: number;
+  totalOccurrencesInScope: number | null;
+  totalOccurrencesStatus?: OccurrenceCountStatus;
+  totalOccurrencesError?: string;
   occurrenceEnrichmentStatus?: 'OK' | 'PARTIAL_ERROR' | 'ERROR';
   offsetLimitReached?: boolean;
+  serverErrorReached?: boolean;
+  catalogErrorMessage?: string;
   pagination: SpeciesDiscoveryPagination;
   uncertainOrHistoricalCount?: number;
   filteredFossilCount?: number;
@@ -280,6 +310,7 @@ export interface SearchIntentResult {
   matchedSpecies?: SpeciesInfo;
   groups?: TaxonGroupCandidate[];
   activeGroupId?: string;
+  subgroupPagination?: SubgroupPaginationMeta;
   discovery?: SpeciesDiscoveryResult;
   unresolvedGroups?: Array<{
     scientificName: string;

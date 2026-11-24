@@ -19,7 +19,9 @@ import {
   SearchIntentResult,
   SpeciesExistenceStatus,
   BiologicalMembershipStatus,
-  OccurrenceCountStatus
+  OccurrenceCountStatus,
+  SubgroupMemberCursor,
+  SubgroupPaginationMeta
 } from '../types/biodiversity';
 
 // In-Memory TTL Önbellek Sistemi (GBIF ve iNaturalist verilerini 15 dakika boyunca saklar)
@@ -49,27 +51,162 @@ export function setCached<T>(key: string, data: T, ttlMs = CACHE_TTL_MS): void {
   GBIF_CACHE.set(key, { data, expiresAt: Date.now() + ttlMs });
 }
 
+const IN_FLIGHT_REQUESTS = new Map<string, Promise<any>>();
+
+function runDedupedInFlight<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const existing = IN_FLIGHT_REQUESTS.get(key);
+  if (existing) return existing;
+  const promise = fn().finally(() => {
+    IN_FLIGHT_REQUESTS.delete(key);
+  });
+  IN_FLIGHT_REQUESTS.set(key, promise);
+  return promise;
+}
+
 /**
  * Retry-After başlığını (saniye veya HTTP tarih formatı) milisaniyeye çevirir.
+ * Sunucunun bildirdiği süreyi 8 saniyeye zorla indirmez.
  */
-function parseRetryAfterMs(retryAfterRaw: string | null): number | null {
+export function parseRetryAfterMs(retryAfterRaw: string | null): number | null {
   if (!retryAfterRaw) return null;
   const trimmed = retryAfterRaw.trim();
   if (!trimmed) return null;
-  const asSeconds = Number(trimmed);
-  if (Number.isFinite(asSeconds) && asSeconds >= 0) {
-    return Math.min(10000, Math.max(250, Math.round(asSeconds * 1000)));
+  if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+    const asSeconds = Number(trimmed);
+    if (Number.isFinite(asSeconds) && asSeconds >= 0) {
+      return Math.round(asSeconds * 1000);
+    }
   }
   const asDateMs = Date.parse(trimmed);
   if (Number.isFinite(asDateMs)) {
     const delta = asDateMs - Date.now();
-    if (delta > 0) return Math.min(10000, Math.max(250, delta));
+    return delta > 0 ? Math.round(delta) : 0;
   }
   return null;
 }
 
+interface HostQueueState {
+  maxConcurrency: number;
+  minIntervalMs: number;
+  activeCount: number;
+  lastStartedAt: number;
+  cooldownUntil: number;
+  timerId: ReturnType<typeof setTimeout> | null;
+  waiters: Array<() => void>;
+}
+
+const HOST_QUEUES = new Map<string, HostQueueState>();
+
+function getHostQueueKey(url: string): string {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host.includes('inaturalist.org')) return 'inaturalist';
+    if (host.includes('gbif.org')) return 'gbif';
+    return host || 'default';
+  } catch {
+    if (url.includes('inaturalist.org')) return 'inaturalist';
+    if (url.includes('gbif.org')) return 'gbif';
+    return 'default';
+  }
+}
+
+function getOrCreateHostQueue(hostKey: string): HostQueueState {
+  let state = HOST_QUEUES.get(hostKey);
+  if (!state) {
+    const isInat = hostKey === 'inaturalist';
+    state = {
+      maxConcurrency: isInat ? 2 : 3,
+      minIntervalMs: isInat ? 160 : 70,
+      activeCount: 0,
+      lastStartedAt: 0,
+      cooldownUntil: 0,
+      timerId: null,
+      waiters: [],
+    };
+    HOST_QUEUES.set(hostKey, state);
+  }
+  return state;
+}
+
+function pumpHostQueue(hostKey: string): void {
+  const state = getOrCreateHostQueue(hostKey);
+  if (state.timerId) {
+    clearTimeout(state.timerId);
+    state.timerId = null;
+  }
+
+  while (state.waiters.length > 0 && state.activeCount < state.maxConcurrency) {
+    const now = Date.now();
+    const earliestStart = Math.max(state.cooldownUntil, state.lastStartedAt + state.minIntervalMs);
+    if (now < earliestStart) {
+      const delay = Math.max(10, earliestStart - now);
+      state.timerId = setTimeout(() => {
+        state.timerId = null;
+        pumpHostQueue(hostKey);
+      }, delay);
+      return;
+    }
+
+    const nextWaiter = state.waiters.shift();
+    if (nextWaiter) {
+      state.activeCount++;
+      state.lastStartedAt = now;
+      nextWaiter();
+    }
+  }
+}
+
+export function setHostCooldown(hostKey: string, waitMs: number): void {
+  if (!Number.isFinite(waitMs) || waitMs <= 0) return;
+  const state = getOrCreateHostQueue(hostKey);
+  const until = Date.now() + Math.round(waitMs);
+  if (until > state.cooldownUntil) {
+    state.cooldownUntil = until;
+    if (state.waiters.length > 0) {
+      pumpHostQueue(hostKey);
+    }
+  }
+}
+
+export function getHostCooldownRemainingMs(urlOrHostKey: string): number {
+  const hostKey = urlOrHostKey.includes('://') ? getHostQueueKey(urlOrHostKey) : urlOrHostKey;
+  const state = HOST_QUEUES.get(hostKey);
+  if (!state) return 0;
+  return Math.max(0, state.cooldownUntil - Date.now());
+}
+
+export function resetHostQueuesForTest(): void {
+  for (const state of HOST_QUEUES.values()) {
+    if (state.timerId) clearTimeout(state.timerId);
+  }
+  HOST_QUEUES.clear();
+}
+
+export function clearGbifCacheForTest(): void {
+  GBIF_CACHE.clear();
+  IN_FLIGHT_REQUESTS.clear();
+}
+
+async function withHostRequestSlot<T>(url: string, task: () => Promise<T>): Promise<T> {
+  const hostKey = getHostQueueKey(url);
+  const state = getOrCreateHostQueue(hostKey);
+
+  await new Promise<void>((resolve) => {
+    state.waiters.push(resolve);
+    pumpHostQueue(hostKey);
+  });
+
+  try {
+    return await task();
+  } finally {
+    state.activeCount = Math.max(0, state.activeCount - 1);
+    pumpHostQueue(hostKey);
+  }
+}
+
 /**
- * Zaman aşımı (Timeout) ve sınırlı otomatik yeniden deneme (Retry / HTTP 429 backoff) mekanizmalı fetch sarmalayıcısı
+ * Paylaşımlı host kuyruğu, zaman aşımı (Timeout) ve sınırlı otomatik yeniden deneme
+ * (Retry / HTTP 429 Retry-After paylaşımlı cooldown) mekanizmalı fetch sarmalayıcısı
  */
 export async function fetchWithRetry(
   url: string,
@@ -77,44 +214,57 @@ export async function fetchWithRetry(
   maxRetries = 2,
   timeoutMs = 8000
 ): Promise<Response> {
+  const hostKey = getHostQueueKey(url);
   let attempt = 0;
   let lastError: any = null;
-  const boundedMaxRetries = Math.max(0, Math.min(4, Math.floor(maxRetries)));
-  const rateLimitMaxAttempts = Math.min(4, Math.max(boundedMaxRetries, 3));
+  const boundedMaxRetries = Math.max(0, Math.min(3, Math.floor(maxRetries)));
+  const rateLimitMaxAttempts = Math.min(3, Math.max(boundedMaxRetries, 2));
 
   while (true) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
     try {
-      const response = await fetch(url, {
-        ...init,
-        signal: controller.signal,
+      const response = await withHostRequestSlot(url, async () => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          return await fetch(url, {
+            ...init,
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
       });
-      clearTimeout(timeoutId);
 
       const is429 = response.status === 429;
       const is5xx = response.status >= 500;
       const allowedAttempts = is429 ? rateLimitMaxAttempts : boundedMaxRetries;
 
-      if (!response.ok && (is429 || is5xx) && attempt < allowedAttempts) {
-        attempt++;
+      if (!response.ok && (is429 || is5xx)) {
         const retryAfterMs = is429 ? parseRetryAfterMs(response.headers?.get?.('Retry-After')) : null;
-        const jitter = Math.floor(Math.random() * 200);
+        const jitter = Math.floor(Math.random() * 180);
         const waitMs = is429
-          ? (retryAfterMs ?? Math.min(8000, 900 * Math.pow(2, attempt - 1) + jitter))
-          : 400 * attempt + jitter;
-        await new Promise((r) => setTimeout(r, waitMs));
-        continue;
+          ? (retryAfterMs !== null ? retryAfterMs : Math.min(6000, 1000 * Math.pow(2, attempt) + jitter))
+          : 350 * (attempt + 1) + jitter;
+
+        if (is429 && waitMs > 0) {
+          setHostCooldown(hostKey, waitMs);
+        }
+
+        if (attempt < allowedAttempts) {
+          attempt++;
+          if (waitMs > 0) {
+            await new Promise((r) => setTimeout(r, waitMs));
+          }
+          continue;
+        }
       }
       return response;
     } catch (err: any) {
-      clearTimeout(timeoutId);
       lastError = err;
       if (attempt < boundedMaxRetries) {
         attempt++;
         const jitter = Math.floor(Math.random() * 150);
-        await new Promise((r) => setTimeout(r, 400 * attempt + jitter));
+        await new Promise((r) => setTimeout(r, 350 * attempt + jitter));
       } else {
         break;
       }
@@ -122,6 +272,113 @@ export async function fetchWithRetry(
   }
 
   throw lastError || new Error(`Ağ isteği başarısız: ${url}`);
+}
+
+export interface SafeJsonParseResult<T = any> {
+  ok: boolean;
+  status: number;
+  data: T | null;
+  errorType?: 'HTTP_ERROR' | 'INVALID_JSON';
+  errorMessage?: string;
+}
+
+async function fetchSafeJson<T = any>(
+  url: string,
+  serviceLabel: string,
+  maxRetries = 1,
+  timeoutMs = 7000
+): Promise<SafeJsonParseResult<T>> {
+  return runDedupedInFlight(`json-req:${url}`, async () => {
+    const res = await fetchWithRetry(url, undefined, maxRetries, timeoutMs);
+    return readSafeJsonResponse<T>(res, serviceLabel);
+  });
+}
+
+async function readSafeJsonResponse<T = any>(
+  res: Response,
+  serviceLabel: string
+): Promise<SafeJsonParseResult<T>> {
+  const status = typeof res?.status === 'number' ? res.status : 0;
+
+  if (!res || !res.ok) {
+    let preview = '';
+    try {
+      if (res && typeof res.text === 'function') {
+        preview = (await res.text()).replace(/\s+/g, ' ').trim().slice(0, 180);
+      }
+    } catch {
+      preview = '';
+    }
+    const detailSuffix = preview ? ` (${preview})` : '';
+    return {
+      ok: false,
+      status,
+      data: null,
+      errorType: 'HTTP_ERROR',
+      errorMessage: `${serviceLabel} HTTP ${status || 'hata'} yanıtı döndürdü${detailSuffix}.`,
+    };
+  }
+
+  let rawText = '';
+  try {
+    if (typeof res.text === 'function') {
+      rawText = await res.text();
+    } else if (typeof res.json === 'function') {
+      const fallbackData = await res.json();
+      if (!fallbackData || typeof fallbackData !== 'object') {
+        return {
+          ok: false,
+          status,
+          data: null,
+          errorType: 'INVALID_JSON',
+          errorMessage: `${serviceLabel} geçersiz veya boş JSON nesnesi döndürdü.`,
+        };
+      }
+      return { ok: true, status, data: fallbackData as T };
+    }
+  } catch (readErr: any) {
+    return {
+      ok: false,
+      status,
+      data: null,
+      errorType: 'INVALID_JSON',
+      errorMessage: `${serviceLabel} yanıt gövdesi okunamadı: ${readErr?.message || 'Bilinmeyen okuma hatası'}.`,
+    };
+  }
+
+  const trimmed = rawText.trim();
+  if (!trimmed || trimmed.startsWith('<')) {
+    const kind = trimmed.startsWith('<') ? 'XML/HTML' : 'boş';
+    return {
+      ok: false,
+      status,
+      data: null,
+      errorType: 'INVALID_JSON',
+      errorMessage: `${serviceLabel} JSON yerine ${kind} yanıt döndürdü (HTTP ${status || 200}).`,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== 'object') {
+      return {
+        ok: false,
+        status,
+        data: null,
+        errorType: 'INVALID_JSON',
+        errorMessage: `${serviceLabel} beklenen JSON nesne formatında yanıt vermedi.`,
+      };
+    }
+    return { ok: true, status, data: parsed as T };
+  } catch {
+    return {
+      ok: false,
+      status,
+      data: null,
+      errorType: 'INVALID_JSON',
+      errorMessage: `${serviceLabel} geçersiz JSON yanıtı döndürdü (${trimmed.slice(0, 120)}).`,
+    };
+  }
 }
 
 export const GBIF_BACKBONE_DATASET_KEY = 'd7dddbf4-2cf0-4f39-9b2a-bb099caae36c';
@@ -1426,26 +1683,29 @@ async function verifyWithGbifBackbone(scientificCandidate: string): Promise<{
   synonymOf?: string;
 }> {
   const formatted = formatScientificCandidate(scientificCandidate);
-  const res = await fetchWithRetry(
-    `https://api.gbif.org/v1/species/match?name=${encodeURIComponent(formatted)}&verbose=true`
-  );
-  const gbifData: GbifBackboneMatchResult = await res.json();
+  return runDedupedInFlight(`bb-verify:${formatted.toLowerCase()}`, async () => {
+    const parsed = await fetchSafeJson<GbifBackboneMatchResult>(
+      `https://api.gbif.org/v1/species/match?name=${encodeURIComponent(formatted)}&verbose=true`,
+      'GBIF Species Match API',
+      2,
+      8000
+    );
+    if (!parsed.ok || !parsed.data) {
+      throw new Error(parsed.errorMessage || 'GBIF taksonomi eşleştirme servisi geçersiz yanıt döndürdü.');
+    }
+    const gbifData: GbifBackboneMatchResult = parsed.data;
 
-  if (!gbifData || gbifData.matchType === 'NONE' || !gbifData.usageKey) {
-    return { matched: false, data: gbifData || {} };
-  }
+    if (!gbifData || gbifData.matchType === 'NONE' || !gbifData.usageKey) {
+      return { matched: false, data: gbifData || {} };
+    }
 
-  let resolvedData: GbifBackboneMatchResult = gbifData;
-  let synonymOf: string | undefined;
+    let resolvedData: GbifBackboneMatchResult = gbifData;
+    let synonymOf: string | undefined;
 
-  // Sinonim bulunduğunda GBIF Backbone üzerindeki kabul edilmiş taksona yönlendir
-  if (gbifData.status === 'SYNONYM' && gbifData.acceptedUsageKey) {
-    try {
-      const accRes = await fetchWithRetry(
-        `https://api.gbif.org/v1/species/${gbifData.acceptedUsageKey}`
-      );
-      if (accRes.ok) {
-        const accData = await accRes.json();
+    // Sinonim bulunduğunda GBIF Backbone üzerindeki kabul edilmiş taksona yönlendir
+    if (gbifData.status === 'SYNONYM' && gbifData.acceptedUsageKey) {
+      try {
+        const accData = await fetchSpeciesDetailCached(gbifData.acceptedUsageKey);
         if (accData && accData.key) {
           synonymOf = gbifData.canonicalName || gbifData.scientificName;
           resolvedData = {
@@ -1464,15 +1724,15 @@ async function verifyWithGbifBackbone(scientificCandidate: string): Promise<{
             matchType: gbifData.matchType,
           };
         }
+      } catch (synErr) {
+        console.warn('Accepted taxon resolution failed:', synErr);
       }
-    } catch (synErr) {
-      console.warn('Accepted taxon resolution failed:', synErr);
+    } else if (gbifData.status === 'SYNONYM' && gbifData.accepted) {
+      synonymOf = gbifData.accepted;
     }
-  } else if (gbifData.status === 'SYNONYM' && gbifData.accepted) {
-    synonymOf = gbifData.accepted;
-  }
 
-  return { matched: true, data: resolvedData, synonymOf };
+    return { matched: true, data: resolvedData, synonymOf };
+  });
 }
 
 function scoreCommonNameMatch(candidateName: string | undefined, query: string): number {
@@ -1501,17 +1761,40 @@ interface DynamicCandidate {
  * Sabit sözlükte olmayan Türkçe / İngilizce yaygın adlar için iNaturalist + GBIF Backbone VERNACULAR aday araması.
  * Yalnızca Animalia (SPECIES) adaylarını kabul eder; virüs/bitki/mantar/yazar-adı yanlış eşleşmelerini eler.
  */
-async function resolveCommonNameCandidates(query: string): Promise<DynamicCandidate[]> {
+async function resolveCommonNameCandidates(query: string): Promise<{
+  candidates: DynamicCandidate[];
+  hasSourceError: boolean;
+  errorMessage?: string;
+}> {
   const clean = normalizeSearchQuery(query);
-  if (!clean || clean.length < 2) return [];
+  if (!clean || clean.length < 2) {
+    return { candidates: [], hasSourceError: false };
+  }
 
   const [inatTrAuto, inatEnAuto, inatTrTaxa, inatEnTaxa, gbifVern] = await Promise.allSettled([
-    fetchWithRetry(`https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(clean)}&locale=tr&per_page=8`, undefined, 1, 6000).then(r => r.json()),
-    fetchWithRetry(`https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(clean)}&locale=en&per_page=8`, undefined, 1, 6000).then(r => r.json()),
-    fetchWithRetry(`https://api.inaturalist.org/v1/taxa?q=${encodeURIComponent(clean)}&locale=tr&rank=species&per_page=8`, undefined, 1, 6000).then(r => r.json()),
-    fetchWithRetry(`https://api.inaturalist.org/v1/taxa?q=${encodeURIComponent(clean)}&locale=en&rank=species&per_page=8`, undefined, 1, 6000).then(r => r.json()),
-    fetchWithRetry(`https://api.gbif.org/v1/species/search?datasetKey=${GBIF_BACKBONE_DATASET_KEY}&q=${encodeURIComponent(clean)}&qField=VERNACULAR&rank=SPECIES&status=ACCEPTED&limit=10`, undefined, 1, 6000).then(r => r.json()),
+    fetchSafeJson(`https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(clean)}&locale=tr&per_page=8`, 'iNaturalist Autocomplete (TR)', 1, 6000),
+    fetchSafeJson(`https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(clean)}&locale=en&per_page=8`, 'iNaturalist Autocomplete (EN)', 1, 6000),
+    fetchSafeJson(`https://api.inaturalist.org/v1/taxa?q=${encodeURIComponent(clean)}&locale=tr&rank=species&per_page=8`, 'iNaturalist Taxa (TR)', 1, 6000),
+    fetchSafeJson(`https://api.inaturalist.org/v1/taxa?q=${encodeURIComponent(clean)}&locale=en&rank=species&per_page=8`, 'iNaturalist Taxa (EN)', 1, 6000),
+    fetchSafeJson(`https://api.gbif.org/v1/species/search?datasetKey=${GBIF_BACKBONE_DATASET_KEY}&q=${encodeURIComponent(clean)}&qField=VERNACULAR&rank=SPECIES&status=ACCEPTED&limit=10`, 'GBIF Vernacular Search', 1, 6000),
   ]);
+
+  let successfulSources = 0;
+  let failedSources = 0;
+  let firstErrorMessage: string | undefined;
+  for (const s of [inatTrAuto, inatEnAuto, inatTrTaxa, inatEnTaxa, gbifVern]) {
+    if (s.status === 'fulfilled' && s.value.ok && s.value.data && Array.isArray((s.value.data as any).results)) {
+      successfulSources++;
+    } else {
+      failedSources++;
+      if (!firstErrorMessage) {
+        firstErrorMessage =
+          s.status === 'fulfilled'
+            ? s.value.errorMessage
+            : (s.reason?.message || 'Yaygın ad eşleştirme servisi yanıt vermedi.');
+      }
+    }
+  }
 
   const candidateMap = new Map<string, DynamicCandidate>();
 
@@ -1527,8 +1810,8 @@ async function resolveCommonNameCandidates(query: string): Promise<DynamicCandid
   // 1. iNaturalist adaylarını değerlendir (sadece Animalia iconic taxa + SPECIES)
   const inatSources = [inatTrAuto, inatEnAuto, inatTrTaxa, inatEnTaxa];
   for (const src of inatSources) {
-    if (src.status !== 'fulfilled' || !Array.isArray(src.value?.results)) continue;
-    for (const t of src.value.results) {
+    if (src.status !== 'fulfilled' || !src.value.ok || !Array.isArray(src.value.data?.results)) continue;
+    for (const t of src.value.data.results) {
       if (!t || t.rank !== 'species' || !t.name) continue;
       const iconic = String(t.iconic_taxon_name || '').toLowerCase();
       if (!ANIMAL_INAT_ICONIC_TAXA.has(iconic)) continue;
@@ -1554,8 +1837,8 @@ async function resolveCommonNameCandidates(query: string): Promise<DynamicCandid
   }
 
   // 2. GBIF Backbone VERNACULAR sonuçlarını değerlendir
-  if (gbifVern.status === 'fulfilled' && Array.isArray(gbifVern.value?.results)) {
-    for (const r of gbifVern.value.results) {
+  if (gbifVern.status === 'fulfilled' && gbifVern.value.ok && Array.isArray(gbifVern.value.data?.results)) {
+    for (const r of gbifVern.value.data.results) {
       if (!r || r.rank !== 'SPECIES' || !r.canonicalName) continue;
       const kingdom = String(r.kingdom || '').toLowerCase();
       if (kingdom !== 'animalia') continue;
@@ -1583,7 +1866,15 @@ async function resolveCommonNameCandidates(query: string): Promise<DynamicCandid
     }
   }
 
-  return Array.from(candidateMap.values()).sort((a, b) => b.score - a.score);
+  if (candidateMap.size === 0 && failedSources > 0) {
+    throw new Error(firstErrorMessage || 'Yaygın ad eşleştirme API servislerinden geçerli yanıt alınamadı.');
+  }
+
+  return {
+    candidates: Array.from(candidateMap.values()).sort((a, b) => b.score - a.score),
+    hasSourceError: failedSources > 0,
+    errorMessage: firstErrorMessage,
+  };
 }
 
 /**
@@ -1612,297 +1903,341 @@ export async function matchSpecies(query: string): Promise<SpeciesInfo> {
     };
   }
 
-  // 1. Parantezli sorgu ayrıştırma ve çift dilli (Türkçe & İngilizce) yaygın ad sözlüğü kontrolü
-  const paren = extractParentheticalParts(normalizedInput);
-  const directCommonEntry = lookupCommonSpeciesEntry(normalizedInput);
-  const outerCommonEntry =
-    !directCommonEntry && paren.hasParentheses && !paren.innerLooksLikeAuthority && paren.outerText
-      ? lookupCommonSpeciesEntry(paren.outerText)
-      : null;
-  const innerCommonEntry =
-    !directCommonEntry && paren.hasParentheses && !paren.innerLooksLikeAuthority && paren.innerText
-      ? lookupCommonSpeciesEntry(paren.innerText)
-      : null;
+  return runDedupedInFlight(`in-flight:${cacheKey}`, async () => {
+    const cachedInside = getCached<SpeciesInfo>(cacheKey);
+    if (cachedInside) return cachedInside;
 
-  let commonEntry: CommonSpeciesEntry | null = directCommonEntry;
-  let targetScientific = directCommonEntry ? directCommonEntry.scientificName : normalizedInput;
-  let predefinedTurkishName = directCommonEntry?.turkishName || '';
-  let predefinedEnglishName = directCommonEntry?.englishName || '';
-  let predefinedIucn: string | undefined = directCommonEntry?.iucn;
-  let iucnSource = 'Resmi IUCN değerlendirme kaydı bulunamadı (NE)';
-  let iucnVerified = false;
-  let ambiguityAlternatives: Array<{ scientificName: string; turkishName: string }> = directCommonEntry?.alternatives || [];
+    // 1. Parantezli sorgu ayrıştırma ve çift dilli (Türkçe & İngilizce) yaygın ad sözlüğü kontrolü
+    const paren = extractParentheticalParts(normalizedInput);
+    const directCommonEntry = lookupCommonSpeciesEntry(normalizedInput);
+    const outerCommonEntry =
+      !directCommonEntry && paren.hasParentheses && !paren.innerLooksLikeAuthority && paren.outerText
+        ? lookupCommonSpeciesEntry(paren.outerText)
+        : null;
+    const innerCommonEntry =
+      !directCommonEntry && paren.hasParentheses && !paren.innerLooksLikeAuthority && paren.innerText
+        ? lookupCommonSpeciesEntry(paren.innerText)
+        : null;
 
-  if (predefinedIucn) {
-    iucnSource = 'IUCN Kırmızı Liste / Canlı Atlası Referans Envanteri';
-    iucnVerified = true;
-  }
+    let commonEntry: CommonSpeciesEntry | null = directCommonEntry;
+    let targetScientific = directCommonEntry ? directCommonEntry.scientificName : normalizedInput;
+    let predefinedTurkishName = directCommonEntry?.turkishName || '';
+    let predefinedEnglishName = directCommonEntry?.englishName || '';
+    let predefinedIucn: string | undefined = directCommonEntry?.iucn;
+    let iucnSource = 'Resmi IUCN değerlendirme kaydı bulunamadı (NE)';
+    let iucnVerified = false;
+    let ambiguityAlternatives: Array<{ scientificName: string; turkishName: string }> = directCommonEntry?.alternatives || [];
 
-  try {
-    let resolvedData: GbifBackboneMatchResult = {};
-    let isMatched = false;
-    let synonymOf: string | undefined;
+    if (predefinedIucn) {
+      iucnSource = 'IUCN Kırmızı Liste / Canlı Atlası Referans Envanteri';
+      iucnVerified = true;
+    }
 
-    const wordCount = normalizedInput.split(' ').length;
+    try {
+      let resolvedData: GbifBackboneMatchResult = {};
+      let isMatched = false;
+      let synonymOf: string | undefined;
+      let hadCommonSourceError = false;
+      let commonSourceErrorMsg: string | undefined;
 
-    const tryVerifySpeciesCandidate = async (candidate: string, allowAnyRankFromCommon: boolean): Promise<boolean> => {
-      const check = await verifyWithGbifBackbone(candidate);
-      if (!check.matched) return false;
-      const d = check.data;
-      const kingdomLower = String(d.kingdom || '').toLowerCase();
-      const isVirusOrNoise =
-        kingdomLower === 'viruses' ||
-        kingdomLower === 'pararnavirae' ||
-        kingdomLower === 'shotokuvirae';
-      const hasValidConfidence = (d.confidence ?? 0) >= 75;
-      const isAcceptedRank =
-        d.rank === 'SPECIES' ||
-        d.rank === 'SUBSPECIES' ||
-        d.rank === 'VARIETY' ||
-        (allowAnyRankFromCommon && Boolean(d.usageKey));
+      const wordCount = normalizedInput.split(' ').length;
 
-      if (!isVirusOrNoise && hasValidConfidence && isAcceptedRank) {
-        resolvedData = d;
-        synonymOf = check.synonymOf;
-        targetScientific = d.canonicalName || candidate;
-        return true;
+      const tryVerifySpeciesCandidate = async (candidate: string, allowAnyRankFromCommon: boolean): Promise<boolean> => {
+        const check = await verifyWithGbifBackbone(candidate);
+        if (!check.matched) return false;
+        const d = check.data;
+        const kingdomLower = String(d.kingdom || '').toLowerCase();
+        const isVirusOrNoise =
+          kingdomLower === 'viruses' ||
+          kingdomLower === 'pararnavirae' ||
+          kingdomLower === 'shotokuvirae';
+        const hasValidConfidence = (d.confidence ?? 0) >= 75;
+        const isAcceptedRank =
+          d.rank === 'SPECIES' ||
+          d.rank === 'SUBSPECIES' ||
+          d.rank === 'VARIETY' ||
+          (allowAnyRankFromCommon && Boolean(d.usageKey));
+
+        if (!isVirusOrNoise && hasValidConfidence && isAcceptedRank) {
+          resolvedData = d;
+          synonymOf = check.synonymOf;
+          targetScientific = d.canonicalName || candidate;
+          return true;
+        }
+        return false;
+      };
+
+      // 2. Doğrudan GBIF Backbone /species/match ile taksonomik doğrulama
+      //    (Yaygın ad sözlüğünden gelmişse, parantez içinde bilimsel ad varsa veya kullanıcı bilimsel ad yazmışsa)
+      if (directCommonEntry) {
+        isMatched = await tryVerifySpeciesCandidate(directCommonEntry.scientificName, true);
+      } else if (paren.hasParentheses) {
+        if (paren.innerLooksLikeAuthority) {
+          isMatched = await tryVerifySpeciesCandidate(normalizedInput, false);
+          if (!isMatched && paren.outerText && isScientificBinomialCandidate(paren.outerText)) {
+            isMatched = await tryVerifySpeciesCandidate(paren.outerText, false);
+          }
+        } else {
+          // Parantez içinde bilimsel tür adı varsa (ör. "Kızıl tilki (Vulpes vulpes)", "Red fox (Vulpes vulpes)")
+          if (paren.innerText && isScientificBinomialCandidate(paren.innerText) && !innerCommonEntry) {
+            isMatched = await tryVerifySpeciesCandidate(paren.innerText, false);
+          }
+          // Dış kısım bilimsel tür adıysa (ör. "Vulpes vulpes (Kızıl tilki)")
+          if (!isMatched && paren.outerText && isScientificBinomialCandidate(paren.outerText) && !outerCommonEntry) {
+            isMatched = await tryVerifySpeciesCandidate(paren.outerText, false);
+          }
+          // Parantez içi veya dışı bilinen yaygın ad sözlüğündeyse (ör. "Kızıl Tilki (Red Fox)", "Katil Balina (Orka)")
+          if (!isMatched && (innerCommonEntry || outerCommonEntry)) {
+            const chosenEntry = innerCommonEntry || outerCommonEntry!;
+            commonEntry = chosenEntry;
+            predefinedTurkishName = chosenEntry.turkishName || '';
+            predefinedEnglishName = chosenEntry.englishName || '';
+            predefinedIucn = chosenEntry.iucn;
+            ambiguityAlternatives = chosenEntry.alternatives || [];
+            if (predefinedIucn) {
+              iucnSource = 'IUCN Kırmızı Liste / Canlı Atlası Referans Envanteri';
+              iucnVerified = true;
+            }
+            isMatched = await tryVerifySpeciesCandidate(chosenEntry.scientificName, true);
+          }
+        }
+      } else if (wordCount >= 2) {
+        isMatched = await tryVerifySpeciesCandidate(targetScientific, false);
       }
-      return false;
-    };
 
-    // 2. Doğrudan GBIF Backbone /species/match ile taksonomik doğrulama
-    //    (Yaygın ad sözlüğünden gelmişse, parantez içinde bilimsel ad varsa veya kullanıcı bilimsel ad yazmışsa)
-    if (directCommonEntry) {
-      isMatched = await tryVerifySpeciesCandidate(directCommonEntry.scientificName, true);
-    } else if (paren.hasParentheses) {
-      if (paren.innerLooksLikeAuthority) {
-        isMatched = await tryVerifySpeciesCandidate(normalizedInput, false);
-        if (!isMatched && paren.outerText && isScientificBinomialCandidate(paren.outerText)) {
-          isMatched = await tryVerifySpeciesCandidate(paren.outerText, false);
+      // 3. Doğrudan bilimsel ad eşleşmediyse Türkçe/İngilizce yaygın ad adaylarını
+      //    iNaturalist + GBIF Backbone VERNACULAR üzerinden ara ve GBIF Backbone ile doğrula
+      if (!isMatched && !commonEntry) {
+        let commonRes = await resolveCommonNameCandidates(normalizedInput);
+        if (commonRes.candidates.length === 0 && paren.hasParentheses && !paren.innerLooksLikeAuthority && paren.outerText) {
+          commonRes = await resolveCommonNameCandidates(paren.outerText);
         }
-      } else {
-        // Parantez içinde bilimsel tür adı varsa (ör. "Kızıl tilki (Vulpes vulpes)", "Red fox (Vulpes vulpes)")
-        if (paren.innerText && isScientificBinomialCandidate(paren.innerText) && !innerCommonEntry) {
-          isMatched = await tryVerifySpeciesCandidate(paren.innerText, false);
+        hadCommonSourceError = commonRes.hasSourceError;
+        commonSourceErrorMsg = commonRes.errorMessage;
+        const candidates = commonRes.candidates;
+        for (const cand of candidates.slice(0, 4)) {
+          const backboneCheck = await verifyWithGbifBackbone(cand.scientificName);
+          if (backboneCheck.matched && backboneCheck.data.usageKey) {
+            const kingdomLower = String(backboneCheck.data.kingdom || '').toLowerCase();
+            if (DISALLOWED_COMMON_KINGDOMS.has(kingdomLower)) continue;
+            if (backboneCheck.data.rank !== 'SPECIES' && backboneCheck.data.rank !== 'SUBSPECIES') continue;
+
+            resolvedData = backboneCheck.data;
+            synonymOf = backboneCheck.synonymOf;
+            targetScientific = resolvedData.canonicalName || cand.scientificName;
+            isMatched = true;
+
+            // Birden fazla güçlü hayvan adayı varsa belirsizlik bilgisi ekle
+            const otherCandidates = candidates
+              .filter(c => c.scientificName.toLowerCase() !== cand.scientificName.toLowerCase() && c.score >= 65)
+              .slice(0, 3)
+              .map(c => ({
+                scientificName: c.scientificName,
+                turkishName: c.commonName || c.scientificName,
+              }));
+            if (otherCandidates.length > 0) {
+              ambiguityAlternatives = otherCandidates;
+            }
+            break;
+          }
         }
-        // Dış kısım bilimsel tür adıysa (ör. "Vulpes vulpes (Kızıl tilki)")
-        if (!isMatched && paren.outerText && isScientificBinomialCandidate(paren.outerText) && !outerCommonEntry) {
-          isMatched = await tryVerifySpeciesCandidate(paren.outerText, false);
+      }
+
+      // 4. Tek kelimelik bilimsel cins/tür sorgusu olarak son kontrol (yalnızca Animalia SPECIES veya kesin bilimsel cins)
+      if (!isMatched && !commonEntry && wordCount === 1) {
+        const singleMatch = await verifyWithGbifBackbone(normalizedInput);
+        if (singleMatch.matched && singleMatch.data.usageKey) {
+          const d = singleMatch.data;
+          const kingdomLower = String(d.kingdom || '').toLowerCase();
+          const isExactRankMatch = d.matchType === 'EXACT' && (d.confidence ?? 0) >= 95 && d.rank === 'SPECIES';
+          if (isExactRankMatch && !DISALLOWED_COMMON_KINGDOMS.has(kingdomLower)) {
+            resolvedData = d;
+            synonymOf = singleMatch.synonymOf;
+            isMatched = true;
+          }
         }
-        // Parantez içi veya dışı bilinen yaygın ad sözlüğündeyse (ör. "Kızıl Tilki (Red Fox)", "Katil Balina (Orka)")
-        if (!isMatched && (innerCommonEntry || outerCommonEntry)) {
-          const chosenEntry = innerCommonEntry || outerCommonEntry!;
-          commonEntry = chosenEntry;
-          predefinedTurkishName = chosenEntry.turkishName || '';
-          predefinedEnglishName = chosenEntry.englishName || '';
-          predefinedIucn = chosenEntry.iucn;
-          ambiguityAlternatives = chosenEntry.alternatives || [];
-          if (predefinedIucn) {
+      }
+
+      if ((!isMatched || !resolvedData.usageKey) && hadCommonSourceError) {
+        throw new Error(commonSourceErrorMsg || 'Yaygın ad eşleştirme kaynaklarından birine erişilemedi.');
+      }
+
+      // 5. Eşleşme bulunamadıysa uydurma bilimsel ad veya rastgele taxonKey döndürme!
+      if (!isMatched || !resolvedData.usageKey) {
+        const unmatchedResult: SpeciesInfo = {
+          scientificName: normalizedInput,
+          canonicalName: normalizedInput,
+          turkishName: normalizedInput,
+          rank: 'SPECIES',
+          taxonomicStatus: 'UNMATCHED',
+          matchType: 'NONE',
+          confidence: 0,
+          isMatched: false,
+          iucnStatus: 'NE',
+          iucnCategoryName: getIucnLabel('NE'),
+          iucnSource: 'GBIF Backbone taksonomi arşivinde eşleşme bulunamadı',
+          iucnVerified: false,
+          summary: `"${normalizedInput}" araması için GBIF Backbone taksonomi veritabanında doğrulanmış bir canlı türü bulunamadı. Lütfen Türkçe, İngilizce veya bilimsel tür adını (ör. Aslan, Panthera leo, Su Samuru, Lutra lutra) kontrol ederek yeniden deneyin.`,
+          gbifUrl: `https://www.gbif.org/species/search?q=${encodeURIComponent(normalizedInput)}`,
+        };
+        setCached(cacheKey, unmatchedResult, 5 * 60 * 1000);
+        return unmatchedResult;
+      }
+
+      const scientificName = resolvedData.scientificName || resolvedData.canonicalName || targetScientific;
+      const canonicalName = resolvedData.canonicalName || scientificName.split('(')[0].trim();
+
+      // Eğer doğrudan bilimsel adla arandıysa çift dilli sözlükten Türkçe/İngilizce ek destek kontrolü
+      if (!predefinedTurkishName) {
+        const sciEntry = BILINGUAL_SPECIES_ENTRIES.find(
+          e => e.entry.scientificName.toLowerCase() === canonicalName.toLowerCase()
+        )?.entry;
+        if (sciEntry) {
+          predefinedTurkishName = sciEntry.turkishName;
+          if (!predefinedEnglishName && sciEntry.englishName) {
+            predefinedEnglishName = sciEntry.englishName;
+          }
+          if (!predefinedIucn && sciEntry.iucn) {
+            predefinedIucn = sciEntry.iucn;
             iucnSource = 'IUCN Kırmızı Liste / Canlı Atlası Referans Envanteri';
             iucnVerified = true;
           }
-          isMatched = await tryVerifySpeciesCandidate(chosenEntry.scientificName, true);
         }
       }
-    } else if (wordCount >= 2) {
-      isMatched = await tryVerifySpeciesCandidate(targetScientific, false);
-    }
 
-    // 3. Doğrudan bilimsel ad eşleşmediyse Türkçe/İngilizce yaygın ad adaylarını
-    //    iNaturalist + GBIF Backbone VERNACULAR üzerinden ara ve GBIF Backbone ile doğrula
-    if (!isMatched && !commonEntry) {
-      let candidates = await resolveCommonNameCandidates(normalizedInput);
-      if (candidates.length === 0 && paren.hasParentheses && !paren.innerLooksLikeAuthority && paren.outerText) {
-        candidates = await resolveCommonNameCandidates(paren.outerText);
+      // iNaturalist üzerinden fotoğraf, Türkçe/İngilizce ad ve özet desteği (birebir bilimsel ad eşleşmesi ile; eşzamanlı istekler tekilleştirilir)
+      const inatOutcome = await runDedupedInFlight(
+        `match-inat:v2:${canonicalName.toLowerCase()}`,
+        () => fetchInatTaxon(canonicalName)
+      );
+      const inatInfo = inatOutcome.status === 'FOUND' ? inatOutcome.data : null;
+
+      let finalIucn = predefinedIucn;
+      let finalIucnCategory = getIucnLabel(predefinedIucn);
+
+      if (inatInfo?.iucnStatus) {
+        finalIucn = inatInfo.iucnStatus;
+        finalIucnCategory = inatInfo.iucnCategoryName || getIucnLabel(finalIucn);
+        iucnSource = 'iNaturalist & IUCN Kırmızı Liste Ortak Veri Ağı';
+        iucnVerified = true;
+      } else if (predefinedIucn) {
+        finalIucn = predefinedIucn;
+        finalIucnCategory = getIucnLabel(predefinedIucn);
+      } else {
+        // Kesin kural: Veri yoksa ASLA otomatik 'LC' atama, 'NE' (Not Evaluated) göster!
+        finalIucn = 'NE';
+        finalIucnCategory = 'Değerlendirilmemiş (Not Evaluated)';
+        iucnSource = 'Resmi IUCN değerlendirme kaydı bulunamadı (NE)';
+        iucnVerified = false;
       }
-      for (const cand of candidates.slice(0, 4)) {
-        const backboneCheck = await verifyWithGbifBackbone(cand.scientificName);
-        if (backboneCheck.matched && backboneCheck.data.usageKey) {
-          const kingdomLower = String(backboneCheck.data.kingdom || '').toLowerCase();
-          if (DISALLOWED_COMMON_KINGDOMS.has(kingdomLower)) continue;
-          if (backboneCheck.data.rank !== 'SPECIES' && backboneCheck.data.rank !== 'SUBSPECIES') continue;
 
-          resolvedData = backboneCheck.data;
-          synonymOf = backboneCheck.synonymOf;
-          targetScientific = resolvedData.canonicalName || cand.scientificName;
-          isMatched = true;
-
-          // Birden fazla güçlü hayvan adayı varsa belirsizlik bilgisi ekle
-          const otherCandidates = candidates
-            .filter(c => c.scientificName.toLowerCase() !== cand.scientificName.toLowerCase() && c.score >= 65)
-            .slice(0, 3)
-            .map(c => ({
-              scientificName: c.scientificName,
-              turkishName: c.commonName || c.scientificName,
-            }));
-          if (otherCandidates.length > 0) {
-            ambiguityAlternatives = otherCandidates;
-          }
-          break;
-        }
+      let summaryText = inatInfo?.summary || '';
+      if (ambiguityAlternatives.length > 0) {
+        const altText = ambiguityAlternatives
+          .map(a => `${a.turkishName} (${a.scientificName})`)
+          .join(', ');
+        const disambigNote = `Not: "${normalizedInput}" araması birden fazla türle ilişkili olabileceğinden birincil temsilci olarak ${predefinedTurkishName || inatInfo?.turkishName || canonicalName} (${canonicalName}) seçilmiştir. Diğer ilgili türler: ${altText}.`;
+        summaryText = summaryText ? `${summaryText} ${disambigNote}` : disambigNote;
       }
-    }
 
-    // 4. Tek kelimelik bilimsel cins/tür sorgusu olarak son kontrol (yalnızca Animalia SPECIES veya kesin bilimsel cins)
-    if (!isMatched && !commonEntry && wordCount === 1) {
-      const singleMatch = await verifyWithGbifBackbone(normalizedInput);
-      if (singleMatch.matched && singleMatch.data.usageKey) {
-        const d = singleMatch.data;
-        const kingdomLower = String(d.kingdom || '').toLowerCase();
-        const isExactRankMatch = d.matchType === 'EXACT' && (d.confidence ?? 0) >= 95 && d.rank === 'SPECIES';
-        if (isExactRankMatch && !DISALLOWED_COMMON_KINGDOMS.has(kingdomLower)) {
-          resolvedData = d;
-          synonymOf = singleMatch.synonymOf;
-          isMatched = true;
-        }
+      const result: SpeciesInfo = {
+        usageKey: resolvedData.usageKey,
+        scientificName,
+        canonicalName,
+        turkishName: predefinedTurkishName || inatInfo?.turkishName || canonicalName,
+        englishName: predefinedEnglishName || inatInfo?.englishName,
+        kingdom: resolvedData.kingdom || 'Animalia',
+        phylum: resolvedData.phylum,
+        class: resolvedData.class,
+        order: resolvedData.order,
+        family: resolvedData.family,
+        genus: resolvedData.genus,
+        rank: resolvedData.rank || 'SPECIES',
+        taxonomicStatus: resolvedData.status || 'ACCEPTED',
+        matchType: resolvedData.matchType,
+        confidence: resolvedData.confidence,
+        synonymOf,
+        isMatched: true,
+        photoUrl: inatInfo?.photoUrl,
+        photoAttribution: inatInfo?.photoAttribution,
+        iucnStatus: finalIucn,
+        iucnCategoryName: finalIucnCategory,
+        iucnSource,
+        iucnVerified,
+        summary: summaryText || undefined,
+        inaturalistUrl: inatInfo?.inatUrl,
+        gbifUrl: `https://www.gbif.org/species/${resolvedData.usageKey}`,
+      };
+
+      // iNaturalist geçici hata verdiyse eksik meta verili kaydı önbelleğe kitleme; sonraki denemede tekrar sorulabilsin
+      if (inatOutcome.status !== 'ERROR') {
+        setCached(cacheKey, result);
       }
-    }
-
-    // 5. Eşleşme bulunamadıysa uydurma bilimsel ad veya rastgele taxonKey döndürme!
-    if (!isMatched || !resolvedData.usageKey) {
-      const unmatchedResult: SpeciesInfo = {
+      return result;
+    } catch (error) {
+      console.error('GBIF species match error:', error);
+      return {
         scientificName: normalizedInput,
         canonicalName: normalizedInput,
-        turkishName: normalizedInput,
+        turkishName: predefinedTurkishName || normalizedInput,
         rank: 'SPECIES',
-        taxonomicStatus: 'UNMATCHED',
-        matchType: 'NONE',
-        confidence: 0,
         isMatched: false,
-        iucnStatus: 'NE',
-        iucnCategoryName: getIucnLabel('NE'),
-        iucnSource: 'GBIF Backbone taksonomi arşivinde eşleşme bulunamadı',
+        matchType: 'ERROR',
+        confidence: 0,
+        iucnStatus: predefinedIucn || 'NE',
+        iucnCategoryName: getIucnLabel(predefinedIucn || 'NE'),
+        iucnSource: 'Değerlendirilmemiş (Ağ Hatası / Çevrimdışı)',
         iucnVerified: false,
-        summary: `"${normalizedInput}" araması için GBIF Backbone taksonomi veritabanında doğrulanmış bir canlı türü bulunamadı. Lütfen Türkçe, İngilizce veya bilimsel tür adını (ör. Aslan, Panthera leo, Su Samuru, Lutra lutra) kontrol ederek yeniden deneyin.`,
+        summary: 'GBIF taksonomi sunucusuna bağlanırken bir hata oluştu. Lütfen bağlantınızı kontrol edip tekrar deneyin.',
         gbifUrl: `https://www.gbif.org/species/search?q=${encodeURIComponent(normalizedInput)}`,
       };
-      setCached(cacheKey, unmatchedResult, 5 * 60 * 1000);
-      return unmatchedResult;
     }
+  });
+}
 
-    const scientificName = resolvedData.scientificName || resolvedData.canonicalName || targetScientific;
-    const canonicalName = resolvedData.canonicalName || scientificName.split('(')[0].trim();
+export interface InatTaxonMetadata {
+  turkishName?: string;
+  englishName?: string;
+  photoUrl?: string;
+  photoAttribution?: string;
+  iucnStatus?: string;
+  iucnCategoryName?: string;
+  summary?: string;
+  inatUrl?: string;
+}
 
-    // Eğer doğrudan bilimsel adla arandıysa çift dilli sözlükten Türkçe/İngilizce ek destek kontrolü
-    if (!predefinedTurkishName) {
-      const sciEntry = BILINGUAL_SPECIES_ENTRIES.find(
-        e => e.entry.scientificName.toLowerCase() === canonicalName.toLowerCase()
-      )?.entry;
-      if (sciEntry) {
-        predefinedTurkishName = sciEntry.turkishName;
-        if (!predefinedEnglishName && sciEntry.englishName) {
-          predefinedEnglishName = sciEntry.englishName;
-        }
-        if (!predefinedIucn && sciEntry.iucn) {
-          predefinedIucn = sciEntry.iucn;
-          iucnSource = 'IUCN Kırmızı Liste / Canlı Atlası Referans Envanteri';
-          iucnVerified = true;
-        }
-      }
-    }
+export type InatTaxonFetchOutcome =
+  | { status: 'FOUND'; data: InatTaxonMetadata }
+  | { status: 'NOT_FOUND' }
+  | { status: 'ERROR'; statusCode?: number; errorMessage: string };
 
-    // iNaturalist üzerinden fotoğraf, Türkçe/İngilizce ad ve özet desteği (birebir bilimsel ad eşleşmesi ile)
-    const inatInfo = await fetchInatTaxon(canonicalName);
-
-    let finalIucn = predefinedIucn;
-    let finalIucnCategory = getIucnLabel(predefinedIucn);
-
-    if (inatInfo?.iucnStatus) {
-      finalIucn = inatInfo.iucnStatus;
-      finalIucnCategory = inatInfo.iucnCategoryName || getIucnLabel(finalIucn);
-      iucnSource = 'iNaturalist & IUCN Kırmızı Liste Ortak Veri Ağı';
-      iucnVerified = true;
-    } else if (predefinedIucn) {
-      finalIucn = predefinedIucn;
-      finalIucnCategory = getIucnLabel(predefinedIucn);
-    } else {
-      // Kesin kural: Veri yoksa ASLA otomatik 'LC' atama, 'NE' (Not Evaluated) göster!
-      finalIucn = 'NE';
-      finalIucnCategory = 'Değerlendirilmemiş (Not Evaluated)';
-      iucnSource = 'Resmi IUCN değerlendirme kaydı bulunamadı (NE)';
-      iucnVerified = false;
-    }
-
-    let summaryText = inatInfo?.summary || '';
-    if (ambiguityAlternatives.length > 0) {
-      const altText = ambiguityAlternatives
-        .map(a => `${a.turkishName} (${a.scientificName})`)
-        .join(', ');
-      const disambigNote = `Not: "${normalizedInput}" araması birden fazla türle ilişkili olabileceğinden birincil temsilci olarak ${predefinedTurkishName || inatInfo?.turkishName || canonicalName} (${canonicalName}) seçilmiştir. Diğer ilgili türler: ${altText}.`;
-      summaryText = summaryText ? `${summaryText} ${disambigNote}` : disambigNote;
-    }
-
-    const result: SpeciesInfo = {
-      usageKey: resolvedData.usageKey,
-      scientificName,
-      canonicalName,
-      turkishName: predefinedTurkishName || inatInfo?.turkishName || canonicalName,
-      englishName: predefinedEnglishName || inatInfo?.englishName,
-      kingdom: resolvedData.kingdom || 'Animalia',
-      phylum: resolvedData.phylum,
-      class: resolvedData.class,
-      order: resolvedData.order,
-      family: resolvedData.family,
-      genus: resolvedData.genus,
-      rank: resolvedData.rank || 'SPECIES',
-      taxonomicStatus: resolvedData.status || 'ACCEPTED',
-      matchType: resolvedData.matchType,
-      confidence: resolvedData.confidence,
-      synonymOf,
-      isMatched: true,
-      photoUrl: inatInfo?.photoUrl,
-      photoAttribution: inatInfo?.photoAttribution,
-      iucnStatus: finalIucn,
-      iucnCategoryName: finalIucnCategory,
-      iucnSource,
-      iucnVerified,
-      summary: summaryText || undefined,
-      inaturalistUrl: inatInfo?.inatUrl,
-      gbifUrl: `https://www.gbif.org/species/${resolvedData.usageKey}`,
-    };
-
-    setCached(cacheKey, result);
-    return result;
-  } catch (error) {
-    console.error('GBIF species match error:', error);
-    return {
-      scientificName: normalizedInput,
-      canonicalName: normalizedInput,
-      turkishName: predefinedTurkishName || normalizedInput,
-      rank: 'SPECIES',
-      isMatched: false,
-      matchType: 'ERROR',
-      confidence: 0,
-      iucnStatus: predefinedIucn || 'NE',
-      iucnCategoryName: getIucnLabel(predefinedIucn || 'NE'),
-      iucnSource: 'Değerlendirilmemiş (Ağ Hatası / Çevrimdışı)',
-      iucnVerified: false,
-      summary: 'GBIF taksonomi sunucusuna bağlanırken bir hata oluştu. Lütfen bağlantınızı kontrol edip tekrar deneyin.',
-      gbifUrl: `https://www.gbif.org/species/search?q=${encodeURIComponent(normalizedInput)}`,
-    };
-  }
+export interface FetchInatTaxonOptions {
+  includeSummary?: boolean;
 }
 
 /**
  * iNaturalist API'den fotoğraf, Türkçe/İngilizce isim ve özet çekme
- * (results[0] körü körüne alınmaz; bilimsel ad ve species rank eşleşmesi esas alınır)
+ * (results[0] körü körüne alınmaz; bilimsel ad ve species rank eşleşmesi esas alınır;
+ * gerçek bulunamama durumu ile HTTP/XML/ağ hataları net biçimde ayrıştırılır)
  */
-async function fetchInatTaxon(scientificName: string) {
+export async function fetchInatTaxon(
+  scientificName: string,
+  options: FetchInatTaxonOptions = {}
+): Promise<InatTaxonFetchOutcome> {
   const cleanSci = normalizeSearchQuery(scientificName).toLowerCase();
-  if (!cleanSci) return null;
+  if (!cleanSci) return { status: 'NOT_FOUND' };
 
-  try {
-    const res = await fetchWithRetry(
-      `https://api.inaturalist.org/v1/taxa?q=${encodeURIComponent(scientificName)}&locale=tr&per_page=10`,
-      undefined,
-      1,
-      6000
-    );
-    const data = await res.json();
-    if (!Array.isArray(data.results) || data.results.length === 0) {
-      return null;
+  const includeSummary = options.includeSummary ?? true;
+  const cacheKey = `inat-taxon:v2:${cleanSci}`;
+  const cachedOutcome = getCached<InatTaxonFetchOutcome>(cacheKey);
+  if (cachedOutcome) {
+    if (cachedOutcome.status === 'NOT_FOUND') return cachedOutcome;
+    if (cachedOutcome.status === 'FOUND' && (!includeSummary || cachedOutcome.data.summary !== undefined)) {
+      return cachedOutcome;
     }
+  }
 
+  return runDedupedInFlight(`in-flight:inat:${cleanSci}:${includeSummary ? 'full' : 'lite'}`, async () => {
     const findExactMatch = (results: any[]) => {
       const exactSpecies = results.find(
         (t: any) =>
@@ -1918,75 +2253,131 @@ async function fetchInatTaxon(scientificName: string) {
       );
     };
 
-    let exactAny = findExactMatch(data.results);
+    try {
+      let exactAny: any = undefined;
 
-    // Eğer /taxa?q ilk 10'da birebir tür yoksa autocomplete ile species seviyesinde ara (örn: Lynx lynx)
-    if (!exactAny) {
-      try {
-        const autoRes = await fetchWithRetry(
-          `https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(scientificName)}&rank=species&locale=tr&per_page=10`,
-          undefined,
+      if (includeSummary) {
+        const parsed = await fetchSafeJson<{ results?: any[] }>(
+          `https://api.inaturalist.org/v1/taxa?q=${encodeURIComponent(scientificName)}&locale=tr&per_page=10`,
+          'iNaturalist Taxa API',
           1,
-          5000
+          6000
         );
-        const autoData = await autoRes.json();
-        if (Array.isArray(autoData.results) && autoData.results.length > 0) {
-          exactAny = findExactMatch(autoData.results);
+        if (!parsed.ok || !parsed.data || !Array.isArray(parsed.data.results)) {
+          const errMsg = parsed.errorMessage || 'iNaturalist API beklenen JSON results dizisini döndürmedi.';
+          console.warn('iNaturalist Taxa API error:', errMsg);
+          return {
+            status: 'ERROR',
+            statusCode: parsed.status || undefined,
+            errorMessage: errMsg,
+          };
         }
-      } catch {
-        // Fallback autocomplete hatası yoksayılır
-      }
-    }
+        exactAny = findExactMatch(parsed.data.results);
 
-    // Eşleşen gerçek tür bulunamadıysa başka cins/alt-familya sonucunu (Panthera, Lutrinae vb.) ASLA alma!
-    if (!exactAny) {
-      return null;
-    }
-
-    const taxon = exactAny;
-    let englishCommonName: string | undefined = taxon.english_common_name || undefined;
-
-    // locale=tr yanıtında english_common_name yoksa aynı taxon ID üzerinden İngilizce adını çek
-    if (!englishCommonName && taxon.id) {
-      try {
-        const enRes = await fetchWithRetry(
-          `https://api.inaturalist.org/v1/taxa/${taxon.id}?locale=en`,
-          undefined,
-          0,
-          4000
+        // Eğer /taxa?q ilk 10'da birebir tür yoksa autocomplete ile species seviyesinde ara (örn: Lynx lynx)
+        if (!exactAny) {
+          const autoParsed = await fetchSafeJson<{ results?: any[] }>(
+            `https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(scientificName)}&rank=species&locale=tr&per_page=10`,
+            'iNaturalist Autocomplete API',
+            1,
+            5000
+          );
+          if (!autoParsed.ok || !autoParsed.data || !Array.isArray(autoParsed.data.results)) {
+            const errMsg = autoParsed.errorMessage || 'iNaturalist Autocomplete API geçersiz yanıt döndürdü.';
+            console.warn('iNaturalist Autocomplete API error:', errMsg);
+            return {
+              status: 'ERROR',
+              statusCode: autoParsed.status || undefined,
+              errorMessage: errMsg,
+            };
+          }
+          if (autoParsed.data.results.length > 0) {
+            exactAny = findExactMatch(autoParsed.data.results);
+          }
+        }
+      } else {
+        // Keşif kartları için hızlı ve tek istekli yol: autocomplete doğrudan species + fotoğraf + IUCN + ad verir
+        const autoParsed = await fetchSafeJson<{ results?: any[] }>(
+          `https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(scientificName)}&rank=species&locale=tr&per_page=5`,
+          'iNaturalist Autocomplete API',
+          1,
+          5500
         );
-        const enData = await enRes.json();
-        const enTaxon = enData?.results?.[0];
-        if (enTaxon?.preferred_common_name) {
-          englishCommonName = enTaxon.preferred_common_name;
+        if (!autoParsed.ok || !autoParsed.data || !Array.isArray(autoParsed.data.results)) {
+          const errMsg = autoParsed.errorMessage || 'iNaturalist Autocomplete API geçersiz yanıt döndürdü.';
+          console.warn('iNaturalist Autocomplete API error:', errMsg);
+          return {
+            status: 'ERROR',
+            statusCode: autoParsed.status || undefined,
+            errorMessage: errMsg,
+          };
         }
-      } catch {
-        // İngilizce ek ad isteği opsiyoneldir
+        exactAny = findExactMatch(autoParsed.data.results);
       }
+
+      if (!exactAny) {
+        const notFound: InatTaxonFetchOutcome = { status: 'NOT_FOUND' };
+        setCached(cacheKey, notFound, 10 * 60 * 1000);
+        return notFound;
+      }
+
+      const taxon = exactAny;
+      let englishCommonName: string | undefined = taxon.english_common_name || undefined;
+
+      // Yalnızca tam analiz modunda İngilizce ad hala eksikse ek detay isteği at
+      if (includeSummary && !englishCommonName && taxon.id) {
+        try {
+          const enParsed = await fetchSafeJson<{ results?: any[] }>(
+            `https://api.inaturalist.org/v1/taxa/${taxon.id}?locale=en`,
+            'iNaturalist Taxon Detail API',
+            0,
+            4000
+          );
+          const enTaxon = enParsed.ok ? enParsed.data?.results?.[0] : undefined;
+          if (enTaxon?.preferred_common_name) {
+            englishCommonName = enTaxon.preferred_common_name;
+          }
+        } catch {
+          // İngilizce ek ad isteği opsiyoneldir
+        }
+      }
+
+      let iucnCode: string | undefined;
+      let iucnLabel: string | undefined;
+
+      if (taxon.conservation_status && taxon.conservation_status.status) {
+        iucnCode = String(taxon.conservation_status.status).toUpperCase();
+        iucnLabel = taxon.conservation_status.status_name || getIucnLabel(iucnCode);
+      }
+
+      const found: InatTaxonFetchOutcome = {
+        status: 'FOUND',
+        data: {
+          turkishName: taxon.preferred_common_name,
+          englishName: englishCommonName,
+          photoUrl: taxon.default_photo?.medium_url || taxon.default_photo?.url,
+          photoAttribution: taxon.default_photo?.attribution,
+          iucnStatus: iucnCode,
+          iucnCategoryName: iucnLabel,
+          summary: taxon.wikipedia_summary,
+          inatUrl: `https://www.inaturalist.org/taxa/${taxon.id}`,
+        },
+      };
+
+      // Eğer mevcut önbellekte summary varsa lite çağrısı onu ezmesin
+      if (includeSummary || !cachedOutcome || cachedOutcome.status !== 'FOUND') {
+        setCached(cacheKey, found, 30 * 60 * 1000);
+      }
+      return found;
+    } catch (e: any) {
+      const errMsg = e?.message || 'iNaturalist API erişilemez durumda.';
+      console.warn('iNaturalist API unavailable:', errMsg);
+      return {
+        status: 'ERROR',
+        errorMessage: errMsg,
+      };
     }
-
-    let iucnCode: string | undefined;
-    let iucnLabel: string | undefined;
-
-    if (taxon.conservation_status && taxon.conservation_status.status) {
-      iucnCode = String(taxon.conservation_status.status).toUpperCase();
-      iucnLabel = taxon.conservation_status.status_name || getIucnLabel(iucnCode);
-    }
-
-    return {
-      turkishName: taxon.preferred_common_name,
-      englishName: englishCommonName,
-      photoUrl: taxon.default_photo?.medium_url || taxon.default_photo?.url,
-      photoAttribution: taxon.default_photo?.attribution,
-      iucnStatus: iucnCode,
-      iucnCategoryName: iucnLabel,
-      summary: taxon.wikipedia_summary,
-      inatUrl: `https://www.inaturalist.org/taxa/${taxon.id}`,
-    };
-  } catch (e) {
-    console.warn('iNaturalist API unavailable:', e);
-  }
-  return null;
+  });
 }
 
 /**
@@ -2083,8 +2474,19 @@ export async function fetchSpeciesAnalysis(
   const cachedAnalysis = getCached<SpeciesAnalysis>(cacheKey);
   if (cachedAnalysis) return cachedAnalysis;
 
+  return runDedupedInFlight(`in-flight:${cacheKey}`, async () => {
+    const cachedInside = getCached<SpeciesAnalysis>(cacheKey);
+    if (cachedInside) return cachedInside;
+
   // 1. Türün taksonomik kimlik ve GBIF Backbone usageKey bilgilerini çöz
   const species = await matchSpecies(scientificName);
+
+  // Taksonomi doğrulama geçici ağ/API hatasıyla sonuçlandıysa bunu "0 gözlem" gibi önbelleğe alma
+  if (species.matchType === 'ERROR') {
+    throw new Error(
+      species.summary || 'GBIF taksonomi sunucusuna bağlanırken hata oluştu.'
+    );
+  }
 
   // Eşleşme bulunamadıysa doğrulanmamış sorguyla occurrence endpoint'ini çağırma
   if (!species.isMatched || !species.usageKey) {
@@ -2160,9 +2562,22 @@ export async function fetchSpeciesAnalysis(
 
   try {
     const res = await fetchWithRetry(gbifUrl);
-    const data = await res.json();
+    const parsedMain = await readSafeJsonResponse<Record<string, any>>(res, 'GBIF Occurrence API');
+    if (!parsedMain.ok || !parsedMain.data) {
+      throw new Error(parsedMain.errorMessage || 'GBIF gözlem servisinden geçerli yanıt alınamadı.');
+    }
+    const data = parsedMain.data;
 
-    totalRecords = typeof data.count === 'number' ? data.count : 0;
+    if (
+      typeof data.count !== 'number' ||
+      !Number.isFinite(data.count) ||
+      data.count < 0 ||
+      !Array.isArray(data.results)
+    ) {
+      throw new Error('GBIF gözlem yanıtı geçerli count veya results alanı içermiyor.');
+    }
+
+    totalRecords = data.count;
 
     // Ölçeklenebilir Sayfalama: Örneklem için concurrent istekler yap (en fazla 1.200 kayıt)
     if (totalRecords > limit && fetchExtraPages) {
@@ -2174,7 +2589,14 @@ export async function fetchSpeciesAnalysis(
           const pageUrl = `https://api.gbif.org/v1/occurrence/search?${taxonParam}${countryParam}${yearParam}&offset=${offset}&limit=${batchLimit}`;
           pagePromises.push(
             fetchWithRetry(pageUrl)
-              .then(r => r.json())
+              .then(r => readSafeJsonResponse<Record<string, any>>(r, `GBIF Occurrence Pagination (offset=${offset})`))
+              .then(pr => {
+                if (!pr.ok || !pr.data || !Array.isArray(pr.data.results)) {
+                  console.warn(`GBIF pagination offset ${offset} invalid response:`, pr.errorMessage);
+                  return { results: [] };
+                }
+                return pr.data;
+              })
               .catch(err => {
                 console.warn(`GBIF pagination offset ${offset} failed:`, err);
                 return { results: [] };
@@ -2202,11 +2624,17 @@ export async function fetchSpeciesAnalysis(
     if (rawYearCounts.length >= FACET_PAGE_LIMIT) {
       try {
         const extraYearUrl = `https://api.gbif.org/v1/occurrence/search?${taxonParam}${countryParam}${yearParam}&limit=0&facet=year&facetLimit=${FACET_PAGE_LIMIT}&facetOffset=${FACET_PAGE_LIMIT}`;
-        const extraYearRes = await fetchWithRetry(extraYearUrl).then(r => r.json());
-        const extraYearCounts = extraYearRes?.facets?.find((f: { field: string }) => f.field === 'YEAR')?.counts || [];
-        rawYearCounts = [...rawYearCounts, ...extraYearCounts];
-        if (extraYearCounts.length >= FACET_PAGE_LIMIT) {
+        const extraYearHttp = await fetchWithRetry(extraYearUrl);
+        const extraYearParsed = await readSafeJsonResponse<Record<string, any>>(extraYearHttp, 'GBIF YEAR Facet API');
+        if (!extraYearParsed.ok || !extraYearParsed.data) {
+          console.warn('Extra YEAR facet pagination error:', extraYearParsed.errorMessage);
           isYearFacetTruncated = true;
+        } else {
+          const extraYearCounts = extraYearParsed.data?.facets?.find((f: { field: string }) => f.field === 'YEAR')?.counts || [];
+          rawYearCounts = [...rawYearCounts, ...extraYearCounts];
+          if (extraYearCounts.length >= FACET_PAGE_LIMIT) {
+            isYearFacetTruncated = true;
+          }
         }
       } catch (yearFacetErr) {
         console.warn('Extra YEAR facet pagination failed:', yearFacetErr);
@@ -2251,8 +2679,14 @@ export async function fetchSpeciesAnalysis(
         try {
           const offset = pageIdx * FACET_PAGE_LIMIT;
           const extraStateUrl = `https://api.gbif.org/v1/occurrence/search?${taxonParam}${countryParam}${yearParam}&limit=0&facet=stateProvince&facetLimit=${FACET_PAGE_LIMIT}&facetOffset=${offset}`;
-          const extraStateRes = await fetchWithRetry(extraStateUrl).then(r => r.json());
-          const extraCounts = extraStateRes?.facets?.find((f: { field: string }) => f.field === 'STATE_PROVINCE')?.counts || [];
+          const extraStateHttp = await fetchWithRetry(extraStateUrl);
+          const extraStateParsed = await readSafeJsonResponse<Record<string, any>>(extraStateHttp, 'GBIF STATE_PROVINCE Facet API');
+          if (!extraStateParsed.ok || !extraStateParsed.data) {
+            console.warn('Extra STATE_PROVINCE facet pagination error:', extraStateParsed.errorMessage);
+            isRegionFacetTruncated = true;
+            break;
+          }
+          const extraCounts = extraStateParsed.data?.facets?.find((f: { field: string }) => f.field === 'STATE_PROVINCE')?.counts || [];
           rawStateCounts = [...rawStateCounts, ...extraCounts];
           if (extraCounts.length < FACET_PAGE_LIMIT) {
             break;
@@ -2514,6 +2948,7 @@ export async function fetchSpeciesAnalysis(
     console.error('GBIF occurrences fetch failed:', err);
     throw err;
   }
+  });
 }
 
 export const TURKEY_PROVINCES: Record<string, string> = {
@@ -2966,6 +3401,53 @@ export const TAXONOMIC_GROUP_PROFILES: TaxonGroupProfile[] = [
           tremarctos: 'And Ayısı (Tremarctos)',
           helarctos: 'Güneş Ayısı (Helarctos)',
           melursus: 'Tembel Ayı (Melursus)',
+        },
+      },
+    ],
+  },
+  {
+    id: 'panda',
+    displayName: 'Panda Türleri (Dev Panda & Kızıl Panda)',
+    aliases: ['panda', 'pandalar', 'panda türleri', 'pandas'],
+    subgroups: [
+      {
+        id: 'panda-tumu',
+        label: 'Tüm Pandalar (Dev Panda & Kızıl Panda)',
+        description: 'Gerçek memeli panda türleri: Ayıgiller (Ursidae) familyasından Dev Panda (Ailuropoda melanoleuca) ve Ailuridae familyasından Kızıl Panda (Ailurus fulgens).',
+        members: [
+          { scientificName: 'Ailuropoda', expectedRank: 'GENUS', expectedClass: 'Mammalia' },
+          { scientificName: 'Ailurus', expectedRank: 'GENUS', expectedClass: 'Mammalia' },
+        ],
+        allowedCanonicalNames: ['Ailuropoda melanoleuca', 'Ailurus fulgens'],
+        excludedClassNames: ['Gastropoda'],
+        genusBiologicalLabels: {
+          ailuropoda: 'Dev Panda (Ailuropoda melanoleuca — Ursidae)',
+          ailurus: 'Kızıl Panda (Ailurus fulgens — Ailuridae)',
+        },
+        membershipPolicyNote: 'Yalnızca yaşayan gerçek memeli panda türleri (Dev Panda ve Kızıl Panda) sunulur; yaygın ad benzerliği taşıyan ilgisiz taksonlar (ör. Hedleyella kara salyangozları) kapsam dışıdır.',
+      },
+      {
+        id: 'panda-dev',
+        label: 'Dev Panda (Ailuropoda)',
+        description: 'Ayıgiller (Ursidae) familyasının Çin\'e özgü bambu ile beslenen türü: Dev Panda (Ailuropoda melanoleuca).',
+        members: [
+          { scientificName: 'Ailuropoda', expectedRank: 'GENUS', expectedClass: 'Mammalia' },
+        ],
+        allowedCanonicalNames: ['Ailuropoda melanoleuca'],
+        genusBiologicalLabels: {
+          ailuropoda: 'Dev Panda (Ailuropoda melanoleuca — Ursidae)',
+        },
+      },
+      {
+        id: 'panda-kizil',
+        label: 'Kızıl Panda (Ailurus)',
+        description: 'Doğu Himalayalar ve Güneybatı Çin\'e özgü Ailuridae familyasının Kızıl Panda (Ailurus fulgens) türü.',
+        members: [
+          { scientificName: 'Ailurus', expectedRank: 'GENUS', expectedClass: 'Mammalia' },
+        ],
+        allowedCanonicalNames: ['Ailurus fulgens'],
+        genusBiologicalLabels: {
+          ailurus: 'Kızıl Panda (Ailurus fulgens — Ailuridae)',
         },
       },
     ],
@@ -3656,6 +4138,185 @@ export const TAXONOMIC_GROUP_PROFILES: TaxonGroupProfile[] = [
       },
     ],
   },
+  {
+    id: 'fil',
+    displayName: 'Fil Türleri (Elephantidae)',
+    aliases: ['fil', 'filler', 'fil türleri', 'elephant', 'elephants', 'elephantidae'],
+    subgroups: [
+      {
+        id: 'fil-tumu',
+        label: 'Tüm Filler (Elephantidae — Afrika & Asya)',
+        description: 'Yaşayan Afrika savan fili (Loxodonta africana), Afrika orman fili (L. cyclotis) ve Asya fili (Elephas maximus) türlerini kapsar. Fosil mamut/Palaeoloxodon kayıtları yalnızca fosil filtresi açıldığında gösterilir.',
+        members: [{ scientificName: 'Elephantidae', expectedRank: 'FAMILY', expectedClass: 'Mammalia' }],
+        genusBiologicalLabels: {
+          loxodonta: 'Afrika Fili (Loxodonta — Elephantidae)',
+          elephas: 'Asya Fili (Elephas — Elephantidae)',
+        },
+        membershipPolicyNote: 'Varsayılan görünümde yalnızca yaşayan Elephantidae türleri listelenir; soyu tükenmiş fosil filler (Palaeoloxodon, Mammuthus) yalnızca fosil filtresi etkinleştirildiğinde gösterilir.',
+      },
+      {
+        id: 'fil-afrika',
+        label: 'Afrika Filleri (Loxodonta)',
+        description: 'Afrika savan fili (Loxodonta africana) ve Afrika orman fili (Loxodonta cyclotis).',
+        members: [{ scientificName: 'Loxodonta', expectedRank: 'GENUS', expectedFamily: 'Elephantidae' }],
+        genusBiologicalLabels: {
+          loxodonta: 'Afrika Fili (Loxodonta)',
+        },
+      },
+      {
+        id: 'fil-asya',
+        label: 'Asya Fili (Elephas)',
+        description: 'Asya ve Hindistan ekosistemlerine özgü Elephas maximus ve yakın taksonlar.',
+        members: [{ scientificName: 'Elephas', expectedRank: 'GENUS', expectedFamily: 'Elephantidae' }],
+        genusBiologicalLabels: {
+          elephas: 'Asya Fili (Elephas)',
+        },
+      },
+    ],
+  },
+  {
+    id: 'bukalemun',
+    displayName: 'Bukalemun Türleri (Chamaeleonidae)',
+    aliases: ['bukalemun', 'bukalemunlar', 'bukalemun türleri', 'chameleon', 'chameleons', 'chamaeleonidae'],
+    subgroups: [
+      {
+        id: 'bukalemun-tumu',
+        label: 'Tüm Bukalemunlar (Chamaeleonidae)',
+        description: 'Bayağı bukalemun (Chamaeleo chamaeleon), peçeli bukalemun, panter bukalemun (Furcifer), Madagaskar yaprak bukalemunları (Brookesia) ve tüm Chamaeleonidae familyası.',
+        members: [{ scientificName: 'Chamaeleonidae', expectedRank: 'FAMILY', expectedClass: 'Squamata' }],
+      },
+      {
+        id: 'bukalemun-chamaeleo',
+        label: 'Akdeniz & Afrika Bukalemunları (Chamaeleo & Trioceros)',
+        description: 'Türkiye ve Akdeniz havzasında da yaşayan Chamaeleo ile boynuzlu Trioceros cinsleri.',
+        members: [
+          { scientificName: 'Chamaeleo', expectedRank: 'GENUS', expectedFamily: 'Chamaeleonidae' },
+          { scientificName: 'Trioceros', expectedRank: 'GENUS', expectedFamily: 'Chamaeleonidae' },
+        ],
+      },
+      {
+        id: 'bukalemun-madagaskar',
+        label: 'Madagaskar & Cüce Bukalemunlar (Furcifer, Calumma, Brookesia, Bradypodion)',
+        description: 'Panter bukalemun (Furcifer), Calumma, yaprak bukalemunu (Brookesia) ve güney Afrika cüce bukalemunları.',
+        members: [
+          { scientificName: 'Furcifer', expectedRank: 'GENUS', expectedFamily: 'Chamaeleonidae' },
+          { scientificName: 'Calumma', expectedRank: 'GENUS', expectedFamily: 'Chamaeleonidae' },
+          { scientificName: 'Brookesia', expectedRank: 'GENUS', expectedFamily: 'Chamaeleonidae' },
+          { scientificName: 'Bradypodion', expectedRank: 'GENUS', expectedFamily: 'Chamaeleonidae' },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'deniz-yildizi',
+    displayName: 'Deniz Yıldızı Türleri (Asteroidea)',
+    aliases: ['deniz yıldızı', 'deniz yıldızları', 'deniz yıldızı türleri', 'starfish', 'sea star', 'sea stars', 'asteroidea'],
+    subgroups: [
+      {
+        id: 'deniz-yildizi-tumu',
+        label: 'Tüm Deniz Yıldızları (Asteroidea)',
+        description: 'Derisidikenliler şubesindeki tüm yaşayan deniz yıldızı takımlarını ve familyalarını kapsar.',
+        members: [{ scientificName: 'Asteroidea', expectedRank: 'CLASS' }],
+      },
+      {
+        id: 'deniz-yildizi-valvatida',
+        label: 'Yastık & Mercan Deniz Yıldızları (Valvatida)',
+        description: 'Akdeniz ve mercan resiflerinde yaygın yastık yıldızı (Asterina), dikenli taç deniz yıldızı vb.',
+        members: [{ scientificName: 'Valvatida', expectedRank: 'ORDER', expectedClass: 'Asteroidea' }],
+      },
+      {
+        id: 'deniz-yildizi-forcipulatida',
+        label: 'Kıskaçlı Deniz Yıldızları (Forcipulatida)',
+        description: 'Bayağı deniz yıldızı (Asterias rubens), Marthasterias glacialis ve kıyı deniz yıldızları.',
+        members: [{ scientificName: 'Forcipulatida', expectedRank: 'ORDER', expectedClass: 'Asteroidea' }],
+      },
+      {
+        id: 'deniz-yildizi-paxillosida',
+        label: 'Kum & Taraklı Deniz Yıldızları (Paxillosida)',
+        description: 'Kumluk deniz tabanında yaşayan Astropecten ve Luidia deniz yıldızları.',
+        members: [{ scientificName: 'Paxillosida', expectedRank: 'ORDER', expectedClass: 'Asteroidea' }],
+      },
+      {
+        id: 'deniz-yildizi-diger',
+        label: 'Dikenli & Derin Deniz Yıldızları (Spinulosida, Velatida, Brisingida)',
+        description: 'Echinasteridae, Solasteridae ve derin deniz kol yıldızları.',
+        members: [
+          { scientificName: 'Spinulosida', expectedRank: 'ORDER', expectedClass: 'Asteroidea' },
+          { scientificName: 'Velatida', expectedRank: 'ORDER', expectedClass: 'Asteroidea' },
+          { scientificName: 'Brisingida', expectedRank: 'ORDER', expectedClass: 'Asteroidea' },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'deniz-kestanesi',
+    displayName: 'Deniz Kestanesi Türleri (Echinoidea)',
+    aliases: ['deniz kestanesi', 'deniz kestaneleri', 'deniz kestanesi türleri', 'sea urchin', 'sea urchins', 'echinoidea'],
+    subgroups: [
+      {
+        id: 'deniz-kestanesi-tumu',
+        label: 'Tüm Deniz Kestaneleri (Echinoidea)',
+        description: 'Akdeniz mor ve siyah deniz kestaneleri, kalem kestaneleri ve kum dolarları dahil Echinoidea sınıfı.',
+        members: [{ scientificName: 'Echinoidea', expectedRank: 'CLASS' }],
+      },
+      {
+        id: 'deniz-kestanesi-camarodonta',
+        label: 'Kıyı & Kaya Deniz Kestaneleri (Camarodonta & Arbacioida)',
+        description: 'Paracentrotus lividus, Arbacia lixula ve Echinus türleri.',
+        members: [
+          { scientificName: 'Camarodonta', expectedRank: 'ORDER', expectedClass: 'Echinoidea' },
+          { scientificName: 'Arbacioida', expectedRank: 'ORDER', expectedClass: 'Echinoidea' },
+        ],
+      },
+      {
+        id: 'deniz-kestanesi-uzun-dikenli',
+        label: 'Uzun Dikenli & Kalem Kestaneleri (Diadematoida & Cidaroida)',
+        description: 'Centrostephanus longispinus, Diadema ve ilkel kalem dikenli deniz kestaneleri.',
+        members: [
+          { scientificName: 'Diadematoida', expectedRank: 'ORDER', expectedClass: 'Echinoidea' },
+          { scientificName: 'Cidaroida', expectedRank: 'ORDER', expectedClass: 'Echinoidea' },
+        ],
+      },
+      {
+        id: 'deniz-kestanesi-duz',
+        label: 'Kalp Kestaneleri & Kum Dolarları (Spatangoida & Clypeasteroida)',
+        description: 'Kumluk tabanda yaşayan yassı kum dolarları ve düzensiz deniz kestaneleri.',
+        members: [
+          { scientificName: 'Spatangoida', expectedRank: 'ORDER', expectedClass: 'Echinoidea' },
+          { scientificName: 'Clypeasteroida', expectedRank: 'ORDER', expectedClass: 'Echinoidea' },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'suluk',
+    displayName: 'Sülük Türleri (Hirudinea / Clitellata)',
+    aliases: ['sülük', 'sülükler', 'sülük türleri', 'leech', 'leeches'],
+    subgroups: [
+      {
+        id: 'suluk-tumu',
+        label: 'Tüm Sülükler (Arhynchobdellida & Rhynchobdellida)',
+        description: 'Tıbbi sülükler (Hirudinidae), yabani sülükler (Haemopidae, Erpobdellidae) ve tatlı su/deniz hortumlu sülükleri (Glossiphoniidae, Piscicolidae). Sülükayaklı kabuklular (Cirripedia) hariçtir.',
+        members: [
+          { scientificName: 'Arhynchobdellida', expectedRank: 'ORDER', expectedClass: 'Clitellata' },
+          { scientificName: 'Rhynchobdellida', expectedRank: 'ORDER', expectedClass: 'Clitellata' },
+        ],
+        excludedClassNames: ['Hexanauplia', 'Thecostraca'],
+      },
+      {
+        id: 'suluk-arhynchobdellida',
+        label: 'Tıbbi & Yabani Sülükler (Arhynchobdellida)',
+        description: 'Hirudo medicinalis, Hirudo verbana, Haemopis ve Erpobdella sülük familyaları.',
+        members: [{ scientificName: 'Arhynchobdellida', expectedRank: 'ORDER', expectedClass: 'Clitellata' }],
+      },
+      {
+        id: 'suluk-rhynchobdellida',
+        label: 'Hortumlu & Balık Sülükleri (Rhynchobdellida)',
+        description: 'Glossiphoniidae (yassı tatlı su sülükleri) ve Piscicolidae (balık sülükleri).',
+        members: [{ scientificName: 'Rhynchobdellida', expectedRank: 'ORDER', expectedClass: 'Clitellata' }],
+      },
+    ],
+  },
 ];
 
 const GROUP_PROFILE_INDEX = (() => {
@@ -3709,6 +4370,7 @@ async function runWithConcurrencyLimit<T, R>(
 
 interface VerifiedHigherTaxonResult {
   verified: boolean;
+  status: 'VERIFIED' | 'NOT_FOUND' | 'ERROR';
   usageKey?: number;
   acceptedUsageKey?: number;
   scientificName: string;
@@ -3723,11 +4385,12 @@ interface VerifiedHigherTaxonResult {
   matchType?: string;
   synonymOf?: string;
   reason?: string;
+  errorMessage?: string;
 }
 
 /**
  * GBIF Backbone üzerinde üst taksonu (GENUS, FAMILY, ORDER, CLASS) homonimlere karşı güvenli doğrular.
- * Sahte taxonKey üretmez; doğrulanamayan taksonu açıkça raporlar.
+ * Sahte taxonKey üretmez; doğrulanamayan taksonu ile API erişim hatasını (ERROR) net biçimde ayırır.
  */
 export async function verifyHigherTaxonWithGbifBackbone(
   scientificName: string,
@@ -3738,167 +4401,226 @@ export async function verifyHigherTaxonWithGbifBackbone(
   const cleanName = normalizeSearchQuery(scientificName);
   const cacheKey = `higher-taxon:v1:${cleanName.toLowerCase()}:${expectedRank || ''}:${expectedClass || ''}:${expectedFamily || ''}`;
   const cached = getCached<VerifiedHigherTaxonResult>(cacheKey);
-  if (cached) return cached;
+  if (cached && cached.status !== 'ERROR') return cached;
 
   if (!cleanName || cleanName.length < 2) {
-    return { verified: false, scientificName: cleanName, reason: 'Geçersiz takson adı.' };
+    return { verified: false, status: 'NOT_FOUND', scientificName: cleanName, reason: 'Geçersiz takson adı.' };
   }
 
-  try {
-    const rankQuery = expectedRank ? `&rank=${encodeURIComponent(expectedRank)}` : '';
-    const matchUrl = `https://api.gbif.org/v1/species/match?name=${encodeURIComponent(cleanName)}&kingdom=Animalia${rankQuery}&strict=true&verbose=true`;
-    const matchRes = await fetchWithRetry(matchUrl, undefined, 1, 7000).then(r => r.json());
+  return runDedupedInFlight(`in-flight:${cacheKey}`, async () => {
+    const cachedInside = getCached<VerifiedHigherTaxonResult>(cacheKey);
+    if (cachedInside && cachedInside.status !== 'ERROR') return cachedInside;
 
-    let candidateRecord: any = null;
-    let synonymOf: string | undefined;
-
-    const isRejectedHigherrank =
-      !matchRes ||
-      matchRes.matchType === 'NONE' ||
-      !matchRes.usageKey ||
-      (matchRes.matchType === 'HIGHERRANK' &&
-        (matchRes.rank === 'KINGDOM' || matchRes.rank === 'PHYLUM' || (expectedRank && matchRes.rank !== expectedRank)));
-
-    if (!isRejectedHigherrank) {
-      candidateRecord = matchRes;
-    } else {
-      // Homonim nedeniyle match HIGHERRANK döndürdüyse (ör. Panthera, Lycaon, Clanga) GBIF Backbone search ile doğrula
-      const searchRankQuery = expectedRank ? `&rank=${encodeURIComponent(expectedRank)}` : '';
-      const searchUrl = `https://api.gbif.org/v1/species/search?datasetKey=${GBIF_BACKBONE_DATASET_KEY}&q=${encodeURIComponent(cleanName)}${searchRankQuery}&limit=15`;
-      const searchRes = await fetchWithRetry(searchUrl, undefined, 1, 7000).then(r => r.json());
-      const hits: any[] = Array.isArray(searchRes?.results) ? searchRes.results : [];
-
-      const matchingHits = hits.filter(h => {
-        if (!h || !h.key) return false;
-        if (String(h.kingdom || '').toLowerCase() !== 'animalia') return false;
-        if (String(h.canonicalName || '').toLowerCase() !== cleanName.toLowerCase()) return false;
-        if (expectedRank && String(h.rank || '').toUpperCase() !== expectedRank.toUpperCase()) return false;
-        if (expectedClass && h.class && String(h.class).toLowerCase() !== expectedClass.toLowerCase()) return false;
-        if (expectedFamily && h.family && String(h.family).toLowerCase() !== expectedFamily.toLowerCase()) return false;
-        return true;
-      });
-
-      const acceptedHit =
-        matchingHits.find(h => h.taxonomicStatus === 'ACCEPTED') ||
-        matchingHits.find(h => h.taxonomicStatus === 'SYNONYM' && h.acceptedKey);
-
-      if (acceptedHit) {
-        candidateRecord = {
-          usageKey: acceptedHit.key,
-          acceptedUsageKey: acceptedHit.acceptedKey,
-          scientificName: acceptedHit.scientificName,
-          canonicalName: acceptedHit.canonicalName,
-          rank: acceptedHit.rank,
-          status: acceptedHit.taxonomicStatus,
-          kingdom: acceptedHit.kingdom,
-          class: acceptedHit.class,
-          order: acceptedHit.order,
-          family: acceptedHit.family,
-          parentKey: acceptedHit.parentKey,
-          matchType: 'BACKBONE_EXACT_SEARCH',
-        };
-      }
-    }
-
-    if (!candidateRecord || !candidateRecord.usageKey) {
-      const failRes: VerifiedHigherTaxonResult = {
-        verified: false,
-        scientificName: cleanName,
-        reason: `"${cleanName}" için GBIF Backbone arşivinde kabul edilen Animalia üst takson kaydı doğrulanamadı.`,
-      };
-      setCached(cacheKey, failRes, 10 * 60 * 1000);
-      return failRes;
-    }
-
-    // Sinonim ise acceptedUsageKey üzerinden kabul edilen üst taksona yönlendir
-    let finalKey: number = Number(candidateRecord.acceptedUsageKey || candidateRecord.usageKey);
-    if (candidateRecord.status === 'SYNONYM' && candidateRecord.acceptedUsageKey) {
-      synonymOf = candidateRecord.canonicalName || candidateRecord.scientificName;
-    }
-
-    // Detaylı alanlar (parentKey, class, family) için /v1/species/{finalKey} kontrolü
-    let detailData: any = null;
     try {
-      const detailRes = await fetchWithRetry(`https://api.gbif.org/v1/species/${finalKey}`, undefined, 1, 7000);
-      if (detailRes.ok) {
-        detailData = await detailRes.json();
+      const resolveMatchOrSearch = async (rankFilter?: string): Promise<any | null> => {
+        const rankQuery = rankFilter ? `&rank=${encodeURIComponent(rankFilter)}` : '';
+        const matchUrl = `https://api.gbif.org/v1/species/match?name=${encodeURIComponent(cleanName)}&kingdom=Animalia${rankQuery}&strict=true&verbose=true`;
+        const matchParsed = await fetchSafeJson<any>(matchUrl, 'GBIF Higher Taxon Match API', 1, 7000);
+        if (!matchParsed.ok || !matchParsed.data) {
+          throw new Error(matchParsed.errorMessage || 'GBIF üst takson doğrulama servisi geçersiz yanıt döndürdü.');
+        }
+        const matchRes = matchParsed.data;
+
+        const matchRankUpper = String(matchRes?.rank || '').toUpperCase();
+        const isGenusDowngrade =
+          Boolean(rankFilter) &&
+          !['GENUS', 'SUBGENUS'].includes(String(rankFilter).toUpperCase()) &&
+          ['GENUS', 'SUBGENUS'].includes(matchRankUpper);
+        const isRejectedHigherrank =
+          !matchRes ||
+          matchRes.matchType === 'NONE' ||
+          !matchRes.usageKey ||
+          isGenusDowngrade ||
+          (matchRes.matchType === 'HIGHERRANK' &&
+            (matchRes.rank === 'KINGDOM' || matchRes.rank === 'PHYLUM' || (rankFilter && matchRes.rank !== rankFilter)));
+
+        if (!isRejectedHigherrank) {
+          return matchRes;
+        }
+
+        // Homonim veya komşu takson basamağı nedeniyle match HIGHERRANK döndürdüyse GBIF Backbone search ile doğrula
+        const searchRankQuery = rankFilter ? `&rank=${encodeURIComponent(rankFilter)}` : '';
+        const searchUrl = `https://api.gbif.org/v1/species/search?datasetKey=${GBIF_BACKBONE_DATASET_KEY}&q=${encodeURIComponent(cleanName)}${searchRankQuery}&limit=15`;
+        const searchParsed = await fetchSafeJson<{ results?: any[] }>(searchUrl, 'GBIF Higher Taxon Search API', 1, 7000);
+        if (!searchParsed.ok || !searchParsed.data) {
+          throw new Error(searchParsed.errorMessage || 'GBIF üst takson arama servisi geçersiz yanıt döndürdü.');
+        }
+        const hits: any[] = Array.isArray(searchParsed.data?.results) ? searchParsed.data.results : [];
+
+        const matchingHits = hits.filter(h => {
+          if (!h || !h.key) return false;
+          if (String(h.kingdom || '').toLowerCase() !== 'animalia') return false;
+          if (String(h.canonicalName || '').toLowerCase() !== cleanName.toLowerCase()) return false;
+          const hRankUpper = String(h.rank || '').toUpperCase();
+          if (rankFilter) {
+            if (hRankUpper !== rankFilter.toUpperCase()) return false;
+          } else {
+            if (!HIGHER_TAXON_RANKS.has(hRankUpper) || hRankUpper === 'KINGDOM' || hRankUpper === 'PHYLUM') return false;
+            if (expectedRank && !['GENUS', 'SUBGENUS'].includes(expectedRank.toUpperCase()) && ['GENUS', 'SUBGENUS'].includes(hRankUpper)) {
+              return false;
+            }
+          }
+          if (expectedClass && h.class && String(h.class).toLowerCase() !== expectedClass.toLowerCase()) return false;
+          if (expectedFamily && h.family && String(h.family).toLowerCase() !== expectedFamily.toLowerCase()) return false;
+          return true;
+        });
+
+        const acceptedHit =
+          matchingHits.find(h => h.taxonomicStatus === 'ACCEPTED') ||
+          matchingHits.find(h => h.taxonomicStatus === 'SYNONYM' && h.acceptedKey);
+
+        if (acceptedHit) {
+          return {
+            usageKey: acceptedHit.key,
+            acceptedUsageKey: acceptedHit.acceptedKey,
+            scientificName: acceptedHit.scientificName,
+            canonicalName: acceptedHit.canonicalName,
+            rank: acceptedHit.rank,
+            status: acceptedHit.taxonomicStatus,
+            kingdom: acceptedHit.kingdom,
+            class: acceptedHit.class,
+            order: acceptedHit.order,
+            family: acceptedHit.family,
+            parentKey: acceptedHit.parentKey,
+            matchType: 'BACKBONE_EXACT_SEARCH',
+          };
+        }
+        return null;
+      };
+
+      let candidateRecord: any = await resolveMatchOrSearch(expectedRank);
+      // iNaturalist ile GBIF Backbone arasındaki takson basamağı farklarını tolere et (ör. Crocodylia: iNat=ORDER, GBIF=CLASS)
+      if (
+        !candidateRecord &&
+        expectedRank &&
+        HIGHER_TAXON_RANKS.has(expectedRank.toUpperCase()) &&
+        !['GENUS', 'SUBGENUS', 'KINGDOM', 'PHYLUM'].includes(expectedRank.toUpperCase())
+      ) {
+        const fallbackCandidate = await resolveMatchOrSearch(undefined);
+        const fbRank = String(fallbackCandidate?.rank || '').toUpperCase();
+        if (
+          fallbackCandidate &&
+          HIGHER_TAXON_RANKS.has(fbRank) &&
+          !['KINGDOM', 'PHYLUM', 'GENUS', 'SUBGENUS'].includes(fbRank)
+        ) {
+          candidateRecord = fallbackCandidate;
+        }
       }
-    } catch {
-      // Detay isteği başarısız olursa mevcut doğrulanmış Backbone alanlarıyla devam edilir
-    }
+      let synonymOf: string | undefined;
 
-    const finalKingdom = detailData?.kingdom || candidateRecord.kingdom;
-    const finalRank = detailData?.rank || candidateRecord.rank;
-    const finalClass = detailData?.class || candidateRecord.class;
-    const finalFamily = detailData?.family || candidateRecord.family;
-    const finalStatus = detailData?.taxonomicStatus || (candidateRecord.status === 'SYNONYM' ? 'ACCEPTED' : candidateRecord.status) || 'ACCEPTED';
+      if (!candidateRecord || !candidateRecord.usageKey) {
+        const failRes: VerifiedHigherTaxonResult = {
+          verified: false,
+          status: 'NOT_FOUND',
+          scientificName: cleanName,
+          reason: `"${cleanName}" için GBIF Backbone arşivinde kabul edilen Animalia üst takson kaydı doğrulanamadı.`,
+        };
+        setCached(cacheKey, failRes, 10 * 60 * 1000);
+        return failRes;
+      }
 
-    if (String(finalKingdom || '').toLowerCase() !== 'animalia') {
-      const nonAnimalRes: VerifiedHigherTaxonResult = {
-        verified: false,
-        scientificName: cleanName,
-        reason: `"${cleanName}" Animalia alemi dışında (${finalKingdom || 'Bilinmiyor'}) yer aldığı için reddedildi.`,
+      // Sinonim ise acceptedUsageKey üzerinden kabul edilen üst taksona yönlendir
+      const finalKey: number = Number(candidateRecord.acceptedUsageKey || candidateRecord.usageKey);
+      if (candidateRecord.status === 'SYNONYM' && candidateRecord.acceptedUsageKey) {
+        synonymOf = candidateRecord.canonicalName || candidateRecord.scientificName;
+      }
+
+      // Yalnızca sinonim çözümlemesi veya eksik sınıf/familya bilgisi gerektiğinde ek /v1/species/{finalKey} isteği at
+      let detailData: any = null;
+      const needsDetailFetch =
+        candidateRecord.status === 'SYNONYM' ||
+        (expectedClass && !candidateRecord.class) ||
+        (expectedFamily && !candidateRecord.family);
+
+      if (needsDetailFetch) {
+        try {
+          detailData = await fetchSpeciesDetailCached(finalKey);
+        } catch {
+          // Detay isteği başarısız olursa mevcut doğrulanmış Backbone alanlarıyla devam edilir
+        }
+      }
+
+      const finalKingdom = detailData?.kingdom || candidateRecord.kingdom;
+      const finalRank = detailData?.rank || candidateRecord.rank;
+      const finalClass = detailData?.class || candidateRecord.class;
+      const finalFamily = detailData?.family || candidateRecord.family;
+      const finalStatus = detailData?.taxonomicStatus || (candidateRecord.status === 'SYNONYM' ? 'ACCEPTED' : candidateRecord.status) || 'ACCEPTED';
+
+      if (String(finalKingdom || '').toLowerCase() !== 'animalia') {
+        const nonAnimalRes: VerifiedHigherTaxonResult = {
+          verified: false,
+          status: 'NOT_FOUND',
+          scientificName: cleanName,
+          reason: `"${cleanName}" Animalia alemi dışında (${finalKingdom || 'Bilinmiyor'}) yer aldığı için reddedildi.`,
+        };
+        setCached(cacheKey, nonAnimalRes, 10 * 60 * 1000);
+        return nonAnimalRes;
+      }
+
+      if (expectedClass && finalClass && String(finalClass).toLowerCase() !== expectedClass.toLowerCase()) {
+        const mismatchRes: VerifiedHigherTaxonResult = {
+          verified: false,
+          status: 'NOT_FOUND',
+          scientificName: cleanName,
+          reason: `"${cleanName}" beklenen sınıf (${expectedClass}) ile uyuşmadı (bulunan: ${finalClass}).`,
+        };
+        setCached(cacheKey, mismatchRes, 10 * 60 * 1000);
+        return mismatchRes;
+      }
+
+      if (expectedFamily && finalFamily && String(finalFamily).toLowerCase() !== expectedFamily.toLowerCase()) {
+        const mismatchFamilyRes: VerifiedHigherTaxonResult = {
+          verified: false,
+          status: 'NOT_FOUND',
+          scientificName: cleanName,
+          reason: `"${cleanName}" beklenen familya (${expectedFamily}) ile uyuşmadı (bulunan: ${finalFamily}).`,
+        };
+        setCached(cacheKey, mismatchFamilyRes, 10 * 60 * 1000);
+        return mismatchFamilyRes;
+      }
+
+      if (finalStatus === 'DOUBTFUL') {
+        const doubtfulRes: VerifiedHigherTaxonResult = {
+          verified: false,
+          status: 'NOT_FOUND',
+          scientificName: cleanName,
+          reason: `"${cleanName}" GBIF Backbone üzerinde DOUBTFUL statüsünde olduğu için hariç tutuldu.`,
+        };
+        setCached(cacheKey, doubtfulRes, 10 * 60 * 1000);
+        return doubtfulRes;
+      }
+
+      const okRes: VerifiedHigherTaxonResult = {
+        verified: true,
+        status: 'VERIFIED',
+        usageKey: Number(candidateRecord.usageKey),
+        acceptedUsageKey: finalKey,
+        scientificName: detailData?.scientificName || candidateRecord.scientificName || cleanName,
+        canonicalName: detailData?.canonicalName || candidateRecord.canonicalName || cleanName,
+        rank: finalRank,
+        taxonomicStatus: finalStatus,
+        kingdom: finalKingdom,
+        class: finalClass,
+        order: detailData?.order || candidateRecord.order,
+        family: finalFamily,
+        parentKey: detailData?.parentKey || candidateRecord.parentKey,
+        matchType: candidateRecord.matchType || 'EXACT',
+        synonymOf,
       };
-      setCached(cacheKey, nonAnimalRes, 10 * 60 * 1000);
-      return nonAnimalRes;
-    }
 
-    if (expectedClass && finalClass && String(finalClass).toLowerCase() !== expectedClass.toLowerCase()) {
-      const mismatchRes: VerifiedHigherTaxonResult = {
+      setCached(cacheKey, okRes, 30 * 60 * 1000);
+      return okRes;
+    } catch (err: any) {
+      const errMsg = err?.message || 'GBIF Backbone doğrulama isteği başarısız oldu.';
+      return {
         verified: false,
+        status: 'ERROR',
         scientificName: cleanName,
-        reason: `"${cleanName}" beklenen sınıf (${expectedClass}) ile uyuşmadı (bulunan: ${finalClass}).`,
+        errorMessage: errMsg,
+        reason: errMsg,
       };
-      setCached(cacheKey, mismatchRes, 10 * 60 * 1000);
-      return mismatchRes;
     }
-
-    if (expectedFamily && finalFamily && String(finalFamily).toLowerCase() !== expectedFamily.toLowerCase()) {
-      const mismatchFamilyRes: VerifiedHigherTaxonResult = {
-        verified: false,
-        scientificName: cleanName,
-        reason: `"${cleanName}" beklenen familya (${expectedFamily}) ile uyuşmadı (bulunan: ${finalFamily}).`,
-      };
-      setCached(cacheKey, mismatchFamilyRes, 10 * 60 * 1000);
-      return mismatchFamilyRes;
-    }
-
-    if (finalStatus === 'DOUBTFUL') {
-      const doubtfulRes: VerifiedHigherTaxonResult = {
-        verified: false,
-        scientificName: cleanName,
-        reason: `"${cleanName}" GBIF Backbone üzerinde DOUBTFUL statüsünde olduğu için hariç tutuldu.`,
-      };
-      setCached(cacheKey, doubtfulRes, 10 * 60 * 1000);
-      return doubtfulRes;
-    }
-
-    const okRes: VerifiedHigherTaxonResult = {
-      verified: true,
-      usageKey: Number(candidateRecord.usageKey),
-      acceptedUsageKey: finalKey,
-      scientificName: detailData?.scientificName || candidateRecord.scientificName || cleanName,
-      canonicalName: detailData?.canonicalName || candidateRecord.canonicalName || cleanName,
-      rank: finalRank,
-      taxonomicStatus: finalStatus,
-      kingdom: finalKingdom,
-      class: finalClass,
-      order: detailData?.order || candidateRecord.order,
-      family: finalFamily,
-      parentKey: detailData?.parentKey || candidateRecord.parentKey,
-      matchType: candidateRecord.matchType || 'EXACT',
-      synonymOf,
-    };
-
-    setCached(cacheKey, okRes, 30 * 60 * 1000);
-    return okRes;
-  } catch (err: any) {
-    return {
-      verified: false,
-      scientificName: cleanName,
-      reason: err?.message || 'GBIF Backbone doğrulama isteği başarısız oldu.',
-    };
-  }
+  });
 }
 
 async function resolveProfileToTaxonGroups(
@@ -3906,6 +4628,8 @@ async function resolveProfileToTaxonGroups(
 ): Promise<{
   groups: TaxonGroupCandidate[];
   unresolvedGroups: Array<{ scientificName: string; reason: string }>;
+  hasApiError: boolean;
+  apiErrorMessage?: string;
 }> {
   const unresolvedGroups: Array<{ scientificName: string; reason: string }> = [];
   const uniqueMemberMap = new Map<string, TaxonGroupMemberSpec>();
@@ -3921,6 +4645,8 @@ async function resolveProfileToTaxonGroups(
 
   const memberSpecs = Array.from(uniqueMemberMap.entries());
   const verifiedMemberCache = new Map<string, VerifiedHigherTaxonResult>();
+  let hasApiError = false;
+  let apiErrorMessage: string | undefined;
 
   const settled = await runWithConcurrencyLimit(
     memberSpecs,
@@ -3939,11 +4665,22 @@ async function resolveProfileToTaxonGroups(
   for (const s of settled) {
     if (s.status === 'fulfilled') {
       verifiedMemberCache.set(s.value.key, s.value.verified);
+      if (s.value.verified.status === 'ERROR') {
+        hasApiError = true;
+        if (!apiErrorMessage) {
+          apiErrorMessage = s.value.verified.errorMessage || s.value.verified.reason;
+        }
+      }
       if (!s.value.verified.verified) {
         unresolvedGroups.push({
           scientificName: s.value.spec.scientificName,
           reason: s.value.verified.reason || 'GBIF Backbone üzerinde doğrulanamadı.',
         });
+      }
+    } else {
+      hasApiError = true;
+      if (!apiErrorMessage) {
+        apiErrorMessage = s.reason?.message || 'GBIF Backbone doğrulama isteği başarısız oldu.';
       }
     }
   }
@@ -4015,7 +4752,7 @@ async function resolveProfileToTaxonGroups(
     });
   }
 
-  return { groups, unresolvedGroups };
+  return { groups, unresolvedGroups, hasApiError, apiErrorMessage };
 }
 
 const GENERAL_GROUP_PRIORITY_ALIASES = new Set(
@@ -4085,6 +4822,11 @@ const GENERAL_GROUP_PRIORITY_ALIASES = new Set(
     'sinek', 'sinekler', 'fly', 'flies',
     'akrep', 'akrepler', 'scorpion', 'scorpions',
     'kene', 'keneler', 'tick', 'ticks',
+    'bukalemun', 'bukalemunlar', 'chameleon', 'chameleons',
+    'deniz yıldızı', 'deniz yıldızları', 'starfish', 'sea star', 'sea stars',
+    'deniz kestanesi', 'deniz kestaneleri', 'sea urchin', 'sea urchins',
+    'sülük', 'sülükler', 'leech', 'leeches',
+    'peygamberdevesi', 'peygamberdeveleri', 'mantis', 'praying mantis',
   ].map(s => foldTurkishChars(s))
 );
 
@@ -4157,64 +4899,74 @@ function extractVernacularsFromSearchItem(item: any): { trName?: string; enName?
 async function fetchTaxonBilingualLabel(
   scientificName: string,
   speciesKey: number,
-  rank?: string
+  rank?: string,
+  skipGbifVernacular = false
 ): Promise<{ trName?: string; enName?: string }> {
   const cacheKey = `taxon-label:v1:${speciesKey}:${scientificName.toLowerCase()}`;
   const cached = getCached<{ trName?: string; enName?: string }>(cacheKey);
   if (cached) return cached;
 
-  let trName: string | undefined;
-  let enName: string | undefined;
+  return runDedupedInFlight(`in-flight:${cacheKey}`, async () => {
+    let trName: string | undefined;
+    let enName: string | undefined;
 
-  const rankParam = rank ? `&rank=${encodeURIComponent(rank.toLowerCase())}` : '';
-  const [inatRes, gbifVernRes] = await Promise.allSettled([
-    fetchWithRetry(
-      `https://api.inaturalist.org/v1/taxa?q=${encodeURIComponent(scientificName)}${rankParam}&locale=tr&per_page=5`,
-      undefined,
-      1,
-      5000
-    ).then(r => (r.ok ? r.json() : null)),
-    fetchWithRetry(
-      `https://api.gbif.org/v1/species/${speciesKey}/vernacularNames?limit=30`,
-      undefined,
-      0,
-      4500
-    ).then(r => (r.ok ? r.json() : null)),
-  ]);
+    const rankParam = rank ? `&rank=${encodeURIComponent(rank.toLowerCase())}` : '';
+    const [inatRes, gbifVernRes] = await Promise.allSettled([
+      fetchSafeJson<{ results?: any[] }>(
+        `https://api.inaturalist.org/v1/taxa?q=${encodeURIComponent(scientificName)}${rankParam}&locale=tr&per_page=5`,
+        'iNaturalist Bilingual Label API',
+        1,
+        5000
+      ),
+      skipGbifVernacular
+        ? Promise.resolve<SafeJsonParseResult<{ results?: any[] }>>({ ok: false, status: 0, data: null })
+        : fetchSafeJson<{ results?: any[] }>(
+            `https://api.gbif.org/v1/species/${speciesKey}/vernacularNames?limit=30`,
+            'GBIF Vernacular Names API',
+            0,
+            4500
+          ),
+    ]);
 
-  if (inatRes.status === 'fulfilled' && Array.isArray(inatRes.value?.results)) {
-    const exactInat = inatRes.value.results.find(
-      (x: any) =>
-        x &&
-        typeof x.name === 'string' &&
-        x.name.toLowerCase() === scientificName.toLowerCase() &&
-        (!x.iconic_taxon_name || ANIMAL_INAT_ICONIC_TAXA.has(String(x.iconic_taxon_name).toLowerCase()))
-    );
-    if (exactInat) {
-      if (exactInat.preferred_common_name && String(exactInat.preferred_common_name).toLowerCase() !== scientificName.toLowerCase()) {
-        trName = exactInat.preferred_common_name;
+    const inatOk = inatRes.status === 'fulfilled' && inatRes.value.ok && Boolean(inatRes.value.data);
+    const gbifVernOk = gbifVernRes.status === 'fulfilled' && gbifVernRes.value.ok && Boolean(gbifVernRes.value.data);
+
+    if (inatOk && Array.isArray(inatRes.value.data?.results)) {
+      const exactInat = inatRes.value.data.results.find(
+        (x: any) =>
+          x &&
+          typeof x.name === 'string' &&
+          x.name.toLowerCase() === scientificName.toLowerCase() &&
+          (!x.iconic_taxon_name || ANIMAL_INAT_ICONIC_TAXA.has(String(x.iconic_taxon_name).toLowerCase()))
+      );
+      if (exactInat) {
+        if (exactInat.preferred_common_name && String(exactInat.preferred_common_name).toLowerCase() !== scientificName.toLowerCase()) {
+          trName = exactInat.preferred_common_name;
+        }
+        if (exactInat.english_common_name && String(exactInat.english_common_name).toLowerCase() !== scientificName.toLowerCase()) {
+          enName = exactInat.english_common_name;
+        }
       }
-      if (exactInat.english_common_name && String(exactInat.english_common_name).toLowerCase() !== scientificName.toLowerCase()) {
-        enName = exactInat.english_common_name;
+    }
+
+    if ((!trName || !enName) && gbifVernOk && Array.isArray(gbifVernRes.value.data?.results)) {
+      const vList: any[] = gbifVernRes.value.data.results;
+      if (!trName) {
+        const tur = vList.find(v => v?.language === 'tur' && v?.preferred) || vList.find(v => v?.language === 'tur');
+        if (tur?.vernacularName) trName = tur.vernacularName;
+      }
+      if (!enName) {
+        const eng = vList.find(v => v?.language === 'eng' && v?.preferred) || vList.find(v => v?.language === 'eng');
+        if (eng?.vernacularName) enName = eng.vernacularName;
       }
     }
-  }
 
-  if ((!trName || !enName) && gbifVernRes.status === 'fulfilled' && Array.isArray(gbifVernRes.value?.results)) {
-    const vList: any[] = gbifVernRes.value.results;
-    if (!trName) {
-      const tur = vList.find(v => v?.language === 'tur' && v?.preferred) || vList.find(v => v?.language === 'tur');
-      if (tur?.vernacularName) trName = tur.vernacularName;
+    const out = { trName, enName };
+    if (inatOk || gbifVernOk) {
+      setCached(cacheKey, out, 30 * 60 * 1000);
     }
-    if (!enName) {
-      const eng = vList.find(v => v?.language === 'eng' && v?.preferred) || vList.find(v => v?.language === 'eng');
-      if (eng?.vernacularName) enName = eng.vernacularName;
-    }
-  }
-
-  const out = { trName, enName };
-  setCached(cacheKey, out, 30 * 60 * 1000);
-  return out;
+    return out;
+  });
 }
 
 /**
@@ -4223,7 +4975,7 @@ async function fetchTaxonBilingualLabel(
 export async function enrichSubgroupLabels(
   subgroups: TaxonGroupCandidate[],
   startIndex = 0,
-  count = 20
+  count = 10
 ): Promise<TaxonGroupCandidate[]> {
   if (!subgroups || subgroups.length === 0) return subgroups;
   const endIndex = Math.min(subgroups.length, startIndex + count);
@@ -4241,9 +4993,10 @@ export async function enrichSubgroupLabels(
 
   if (targets.length === 0) return subgroups;
 
-  const settled = await runWithConcurrencyLimit(targets, 4, async ({ index, group }) => {
+  const settled = await runWithConcurrencyLimit(targets, 2, async ({ index, group }) => {
     const key = Number(group.acceptedUsageKey || group.taxonKeys?.[0]);
-    const names = await fetchTaxonBilingualLabel(group.scientificName, key, group.rank);
+    const skipGbifVernacular = Boolean((group as any)._hasInlineGbifChecked);
+    const names = await fetchTaxonBilingualLabel(group.scientificName, key, group.rank, skipGbifVernacular);
     return { index, names };
   });
 
@@ -4269,184 +5022,412 @@ export async function enrichSubgroupLabels(
   return updated;
 }
 
+export interface TaxonSubgroupExpansionResult {
+  groups: TaxonGroupCandidate[];
+  pagination: SubgroupPaginationMeta;
+}
+
+export interface ExpandSubgroupsOptions {
+  countryCode?: string;
+  existingResult?: TaxonSubgroupExpansionResult;
+  fetchAll?: boolean;
+  maxPagesPerBatch?: number;
+}
+
 /**
  * Doğrulanmış herhangi bir Animalia üst taksonunu (tekil veya COMPOSITE_GROUP)
- * yalnızca GBIF Backbone taksonomik hiyerarşisi üzerinden sayfalı olarak gerçek biyolojik alt gruplarına ayırır.
- * Ülke/gözlem sayısına bağlı değildir; TR ve Global görünümlerde aynı alt grupları üretir.
+ * yalnızca GBIF Backbone taksonomik hiyerarşisi üzerinden gerçek cursor tabanlı sayfalama ile
+ * biyolojik alt gruplarına ayırır. Eksik alt gruplar varsa sayfalama meta verisi ile bildirir;
+ * soyu tükenmiş taksonları fosil/görünüm filtresinden bağımsız olarak katalogdan silmez.
  */
-export async function expandTaxonCandidateToSubgroups(
+export async function expandTaxonCandidateToSubgroupsPaged(
   parentGroup: TaxonGroupCandidate,
-  _countryCode: string = 'TR'
-): Promise<TaxonGroupCandidate[]> {
+  options: ExpandSubgroupsOptions = {}
+): Promise<TaxonSubgroupExpansionResult> {
+  const existingResult = options.existingResult;
+  const effectiveParent = existingResult?.pagination?.parentGroup || parentGroup;
+  const fetchAll = Boolean(options.fetchAll);
+  const maxPagesPerBatch = fetchAll ? Number.POSITIVE_INFINITY : Math.max(1, options.maxPagesPerBatch ?? 1);
+
   const rawMemberKeys =
-    parentGroup.taxonKeys && parentGroup.taxonKeys.length > 0
-      ? parentGroup.taxonKeys
-      : [parentGroup.acceptedUsageKey || parentGroup.usageKey];
+    effectiveParent.taxonKeys && effectiveParent.taxonKeys.length > 0
+      ? effectiveParent.taxonKeys
+      : [effectiveParent.acceptedUsageKey || effectiveParent.usageKey];
   const memberKeys = Array.from(
     new Set(rawMemberKeys.filter((k): k is number => typeof k === 'number' && k > 0))
   ).sort((a, b) => a - b);
 
-  if (memberKeys.length === 0 || !parentGroup.isVerified) {
-    return [parentGroup];
-  }
-
-  const cacheKey = `expand-bb-subgroups:v2:${memberKeys.join(',')}:${(parentGroup.rank || '').toUpperCase()}`;
-  const cached = getCached<TaxonGroupCandidate[]>(cacheKey);
-  if (cached) return cached;
-
-  const excludedSciSet = new Set(
-    (parentGroup.excludedScientificNames || []).map(n => n.toLowerCase())
-  );
-  const excludedTaxonSet = new Set(
-    (parentGroup.excludedOrderNames || []).map(n => n.toLowerCase())
-  );
-  const parentKeySet = new Set<number>(memberKeys);
-
-  const fetchBackboneChildrenAtRank = async (
-    mKey: number,
-    targetRank: string,
-    maxCollect = 600
-  ): Promise<any[]> => {
-    const collected: any[] = [];
-    const seen = new Set<number>();
-    const pageLimit = 200;
-    let offset = 0;
-
-    while (collected.length < maxCollect) {
-      const url = `https://api.gbif.org/v1/species/search?datasetKey=${GBIF_BACKBONE_DATASET_KEY}&higherTaxonKey=${mKey}&rank=${encodeURIComponent(targetRank)}&status=ACCEPTED&limit=${pageLimit}&offset=${offset}`;
-      try {
-        const res = await fetchWithRetry(url, undefined, 1, 8000);
-        if (!res.ok) break;
-        const json = await res.json();
-        const items: any[] = Array.isArray(json?.results) ? json.results : [];
-        if (items.length === 0) break;
-
-        for (const item of items) {
-          const k = Number(item?.key);
-          if (!k || seen.has(k) || parentKeySet.has(k)) continue;
-          seen.add(k);
-          if (String(item.kingdom || '').toLowerCase() !== 'animalia') continue;
-          if (item.taxonomicStatus && item.taxonomicStatus !== 'ACCEPTED') continue;
-          if (item.extinct === true) continue;
-          collected.push(item);
-        }
-
-        if (json?.endOfRecords || items.length < pageLimit) break;
-        offset += items.length;
-      } catch {
-        break;
-      }
-    }
-    return collected;
-  };
-
-  const mergedRawByKey = new Map<number, { item: any; parentMemberKey: number; numDescendants: number }>();
-
-  await runWithConcurrencyLimit(memberKeys, 3, async (mKey) => {
-    const detail = await fetchSpeciesDetailCached(mKey);
-    const mRank = String(detail?.rank || parentGroup.rank || '').toUpperCase();
-    const primaryChildRank = getChildRankForRank(mRank);
-    if (!primaryChildRank) return;
-
-    let items = await fetchBackboneChildrenAtRank(mKey, primaryChildRank, 600);
-    if (items.length < 2) {
-      const fbRank = getFallbackChildRank(primaryChildRank);
-      if (fbRank) {
-        const fbItems = await fetchBackboneChildrenAtRank(mKey, fbRank, 600);
-        if (fbItems.length >= 2 || (fbItems.length > items.length)) {
-          items = fbItems;
-        }
-      }
-    }
-
-    for (const item of items) {
-      const childKey = Number(item.key);
-      if (!childKey || parentKeySet.has(childKey)) continue;
-      const childSci = String(item.canonicalName || item.scientificName || '').trim();
-      const childSciLower = childSci.toLowerCase();
-      if (!childSci) continue;
-      if (excludedSciSet.has(childSciLower) || excludedTaxonSet.has(childSciLower)) continue;
-
-      const orderLower = String(item.order || '').toLowerCase();
-      const familyLower = String(item.family || '').toLowerCase();
-      const genusLower = String(item.genus || '').toLowerCase();
-      if (
-        (orderLower && excludedTaxonSet.has(orderLower)) ||
-        (familyLower && excludedTaxonSet.has(familyLower)) ||
-        (genusLower && excludedTaxonSet.has(genusLower))
-      ) {
-        continue;
-      }
-
-      if (!mergedRawByKey.has(childKey)) {
-        mergedRawByKey.set(childKey, {
-          item,
-          parentMemberKey: mKey,
-          numDescendants: Number(item.numDescendants || 0),
-        });
-      }
-    }
-  });
-
-  if (mergedRawByKey.size === 0) {
-    return [parentGroup];
-  }
-
-  // Gözlemlerden ve ülkeden bağımsız deterministik sıralama: alt takson zenginliği azalan, ardından alfabetik
-  const sortedEntries = Array.from(mergedRawByKey.values()).sort((a, b) => {
-    if (b.numDescendants !== a.numDescendants) {
-      return b.numDescendants - a.numDescendants;
-    }
-    const nameA = String(a.item.canonicalName || a.item.scientificName || '');
-    const nameB = String(b.item.canonicalName || b.item.scientificName || '');
-    return nameA.localeCompare(nameB, 'en');
-  });
-
-  const childCandidates: TaxonGroupCandidate[] = sortedEntries.map(({ item, parentMemberKey, numDescendants }) => {
-    const childKey = Number(item.key);
-    const childRank = String(item.rank || '').toUpperCase();
-    const childSci = String(item.canonicalName || item.scientificName || '').trim();
-    const inlineNames = extractVernacularsFromSearchItem(item);
-    const commonLabel = inlineNames.trName || inlineNames.enName;
-    const displayLabel = commonLabel
-      ? `${commonLabel} (${childSci})`
-      : `${childSci} (${translateTaxonRankTr(childRank)})`;
-
+  if (memberKeys.length === 0 || !effectiveParent.isVerified) {
     return {
-      id: `dyn-sub-${childKey}`,
-      label: displayLabel,
-      scientificName: childSci,
-      usageKey: childKey,
-      acceptedUsageKey: childKey,
-      taxonKeys: [childKey],
-      rank: childRank,
-      taxonomicStatus: String(item.taxonomicStatus || 'ACCEPTED'),
-      kingdom: 'Animalia',
-      parentKey: typeof item.parentKey === 'number' ? item.parentKey : parentMemberKey,
-      turkishName: inlineNames.trName,
-      englishName: inlineNames.enName,
-      description: `${parentGroup.scientificName} altındaki GBIF Backbone doğrulamalı ${translateTaxonRankTr(childRank).toLowerCase()} grubu${numDescendants > 0 ? ` (${numDescendants.toLocaleString('tr-TR')} alt takson)` : ''}.`,
-      dataSource: 'GBIF Backbone Taxonomy',
-      matchType: 'VERIFIED_SUBGROUP',
-      isVerified: true,
-      canDrillDown: ['KINGDOM', 'PHYLUM', 'CLASS', 'ORDER', 'FAMILY'].includes(childRank) && childRank !== 'GENUS',
+      groups: [effectiveParent],
+      pagination: {
+        parentGroup: effectiveParent,
+        hasMore: false,
+        loadedCount: 1,
+        totalMatchedCount: 1,
+        offsetLimitReached: false,
+        hasError: false,
+        cursors: [],
+      },
     };
+  }
+
+  const cacheKey = `expand-bb-subgroups:v3:${memberKeys.join(',')}:${(effectiveParent.rank || '').toUpperCase()}`;
+  if (!existingResult && !fetchAll) {
+    const cached = getCached<TaxonSubgroupExpansionResult>(cacheKey);
+    if (cached) return cached;
+  }
+
+  const inflightKey = existingResult
+    ? `in-flight:${cacheKey}:more:${existingResult.pagination.cursors.map(c => `${c.memberKey}:${c.nextOffset}`).join(',')}:${fetchAll ? 'all' : 'page'}`
+    : `in-flight:${cacheKey}:${fetchAll ? 'all' : 'init'}`;
+
+  return runDedupedInFlight(inflightKey, async () => {
+    const excludedSciSet = new Set(
+      (effectiveParent.excludedScientificNames || []).map(n => n.toLowerCase())
+    );
+    const excludedTaxonSet = new Set(
+      (effectiveParent.excludedOrderNames || []).map(n => n.toLowerCase())
+    );
+    const parentKeySet = new Set<number>(memberKeys);
+
+    // İlk yüklemede varsa mevcut cursor durumunu koru; aksi halde her memberKey için cursor başlat
+    let cursors: SubgroupMemberCursor[] = [];
+    if (existingResult?.pagination?.cursors?.length) {
+      cursors = existingResult.pagination.cursors.map(c => ({
+        ...c,
+        // Hata nedeniyle durmuş cursor'ları tekrar denemeye aç
+        hasError: false,
+        errorMessage: undefined,
+      }));
+    } else {
+      await runWithConcurrencyLimit(memberKeys, 3, async (mKey) => {
+        const detail = await fetchSpeciesDetailCached(mKey);
+        const mRank = String(detail?.rank || effectiveParent.rank || '').toUpperCase();
+        const primaryChildRank = getChildRankForRank(mRank);
+        if (!primaryChildRank) {
+          cursors.push({
+            memberKey: mKey,
+            targetRank: '',
+            nextOffset: 0,
+            endOfRecords: true,
+            apiTotalCount: 0,
+            hitOffsetLimit: false,
+            hasError: false,
+          });
+          return;
+        }
+        cursors.push({
+          memberKey: mKey,
+          targetRank: primaryChildRank,
+          nextOffset: 0,
+          endOfRecords: false,
+          apiTotalCount: null,
+          hitOffsetLimit: false,
+          hasError: false,
+        });
+      });
+      cursors.sort((a, b) => a.memberKey - b.memberKey);
+    }
+
+    const existingChildByKey = new Map<number, TaxonGroupCandidate>();
+    if (existingResult?.groups) {
+      for (const g of existingResult.groups) {
+        if (g.isParentOverview) continue;
+        const k = g.acceptedUsageKey || g.taxonKeys?.[0];
+        if (k) existingChildByKey.set(k, g);
+      }
+    }
+
+    const newlyCollectedByKey = new Map<number, { item: any; parentMemberKey: number; numDescendants: number }>();
+
+    const fetchBackboneChildrenPages = async (
+      cursor: SubgroupMemberCursor,
+      rankToQuery: string,
+      maxPages: number
+    ): Promise<Array<{ item: any; parentMemberKey: number; numDescendants: number }>> => {
+      const collected: Array<{ item: any; parentMemberKey: number; numDescendants: number }> = [];
+      const pageLimit = fetchAll ? 1000 : 200;
+      let pagesFetched = 0;
+
+      while (!cursor.endOfRecords && pagesFetched < maxPages) {
+        const remainingBeforeCap = GBIF_SPECIES_SEARCH_MAX_OFFSET - cursor.nextOffset;
+        if (remainingBeforeCap <= 0) {
+          cursor.endOfRecords = true;
+          cursor.hitOffsetLimit = true;
+          break;
+        }
+        const effectiveLimit = Math.min(pageLimit, remainingBeforeCap);
+        const url = `https://api.gbif.org/v1/species/search?datasetKey=${GBIF_BACKBONE_DATASET_KEY}&higherTaxonKey=${cursor.memberKey}&rank=${encodeURIComponent(rankToQuery)}&status=ACCEPTED&limit=${effectiveLimit}&offset=${cursor.nextOffset}`;
+
+        try {
+          const res = await fetchWithRetry(url, undefined, 2, 8000);
+          if (!res.ok) {
+            const errBody = await res.text().catch(() => '');
+            if (res.status === 400) {
+              const isBoundaryExceeded =
+                cursor.nextOffset >= GBIF_SPECIES_SEARCH_MAX_OFFSET ||
+                cursor.nextOffset + effectiveLimit > GBIF_SPECIES_SEARCH_MAX_OFFSET;
+              const hasOffsetLimitBody =
+                /max(?:imum)?\s*offset|offset\s*(?:must|cannot|can't|exceed|exceeded|limit|greater|<=|<)|exceeded.*offset|100[\s,.]?000/i.test(
+                  errBody
+                );
+              if (isBoundaryExceeded || hasOffsetLimitBody) {
+                cursor.endOfRecords = true;
+                cursor.hitOffsetLimit = true;
+                break;
+              }
+            }
+            cursor.hasError = true;
+            cursor.errorMessage = `GBIF alt grup servisi HTTP ${res.status} hatası döndürdü.`;
+            break;
+          }
+
+          let json: any = null;
+          try {
+            json = await res.json();
+          } catch {
+            cursor.hasError = true;
+            cursor.errorMessage = 'GBIF alt grup yanıtı geçerli JSON değil.';
+            break;
+          }
+
+          if (!json || typeof json !== 'object' || !Array.isArray(json.results)) {
+            cursor.hasError = true;
+            cursor.errorMessage = 'GBIF alt grup yanıtında results alanı eksik.';
+            break;
+          }
+
+          const items: any[] = json.results;
+          if (typeof json.count === 'number' && Number.isFinite(json.count)) {
+            cursor.apiTotalCount = json.count;
+          }
+
+          for (const item of items) {
+            const k = Number(item?.key);
+            if (!k || parentKeySet.has(k)) continue;
+            if (String(item.kingdom || '').toLowerCase() !== 'animalia') continue;
+            if (item.taxonomicStatus && item.taxonomicStatus !== 'ACCEPTED') continue;
+            // Soyu tükenmiş taksonları (item.extinct === true) katalogdan SİLME — metadata ile işaretle
+            collected.push({
+              item,
+              parentMemberKey: cursor.memberKey,
+              numDescendants: Number(item.numDescendants || 0),
+            });
+          }
+
+          cursor.nextOffset += items.length;
+          pagesFetched++;
+
+          if (cursor.nextOffset >= GBIF_SPECIES_SEARCH_MAX_OFFSET) {
+            cursor.endOfRecords = true;
+            cursor.hitOffsetLimit = true;
+          } else if (json.endOfRecords === true || items.length === 0) {
+            cursor.endOfRecords = true;
+          }
+        } catch (err: any) {
+          cursor.hasError = true;
+          cursor.errorMessage = err?.message || 'GBIF alt grup servisine erişilemedi.';
+          break;
+        }
+      }
+
+      return collected;
+    };
+
+    const activeCursors = cursors.filter(c => !c.endOfRecords && c.targetRank);
+    await runWithConcurrencyLimit(activeCursors, 3, async (cursor) => {
+      let rows = await fetchBackboneChildrenPages(cursor, cursor.targetRank, maxPagesPerBatch);
+
+      // İlk sorguda çok az (<2) sonuç gelip tarama bittiyse ve henüz bir sonraki rank'a düşülmediyse fallback rank dene
+      if (
+        !existingResult &&
+        !cursor.hasError &&
+        cursor.endOfRecords &&
+        rows.length < 2
+      ) {
+        const fbRank = getFallbackChildRank(cursor.targetRank);
+        if (fbRank) {
+          const fbCursor: SubgroupMemberCursor = {
+            memberKey: cursor.memberKey,
+            targetRank: fbRank,
+            nextOffset: 0,
+            endOfRecords: false,
+            apiTotalCount: null,
+            hitOffsetLimit: false,
+            hasError: false,
+          };
+          const fbRows = await fetchBackboneChildrenPages(fbCursor, fbRank, maxPagesPerBatch);
+          if (!fbCursor.hasError && (fbRows.length >= 2 || fbRows.length > rows.length)) {
+            rows = fbRows;
+            cursor.targetRank = fbCursor.targetRank;
+            cursor.nextOffset = fbCursor.nextOffset;
+            cursor.endOfRecords = fbCursor.endOfRecords;
+            cursor.apiTotalCount = fbCursor.apiTotalCount;
+            cursor.hitOffsetLimit = fbCursor.hitOffsetLimit;
+            cursor.hasError = fbCursor.hasError;
+            cursor.errorMessage = fbCursor.errorMessage;
+          }
+        }
+      }
+
+      for (const row of rows) {
+        const { item, parentMemberKey, numDescendants } = row;
+        const childKey = Number(item.key);
+        if (!childKey || parentKeySet.has(childKey)) continue;
+        const childSci = String(item.canonicalName || item.scientificName || '').trim();
+        const childSciLower = childSci.toLowerCase();
+        if (!childSci) continue;
+        if (excludedSciSet.has(childSciLower) || excludedTaxonSet.has(childSciLower)) continue;
+
+        const orderLower = String(item.order || '').toLowerCase();
+        const familyLower = String(item.family || '').toLowerCase();
+        const genusLower = String(item.genus || '').toLowerCase();
+        if (
+          (orderLower && excludedTaxonSet.has(orderLower)) ||
+          (familyLower && excludedTaxonSet.has(familyLower)) ||
+          (genusLower && excludedTaxonSet.has(genusLower))
+        ) {
+          continue;
+        }
+
+        if (!existingChildByKey.has(childKey) && !newlyCollectedByKey.has(childKey)) {
+          newlyCollectedByKey.set(childKey, { item, parentMemberKey, numDescendants });
+        }
+      }
+    });
+
+    const newChildCandidates: TaxonGroupCandidate[] = Array.from(newlyCollectedByKey.values()).map(
+      ({ item, parentMemberKey, numDescendants }) => {
+        const childKey = Number(item.key);
+        const childRank = String(item.rank || '').toUpperCase();
+        const childSci = String(item.canonicalName || item.scientificName || '').trim();
+        const isExtinct = item.extinct === true;
+        const inlineNames = extractVernacularsFromSearchItem(item);
+        const commonLabel = inlineNames.trName || inlineNames.enName;
+        const displayLabel = commonLabel
+          ? `${commonLabel} (${childSci})`
+          : `${childSci} (${translateTaxonRankTr(childRank)})`;
+
+        return {
+          id: `dyn-sub-${childKey}`,
+          label: displayLabel,
+          scientificName: childSci,
+          usageKey: childKey,
+          acceptedUsageKey: childKey,
+          taxonKeys: [childKey],
+          rank: childRank,
+          taxonomicStatus: String(item.taxonomicStatus || 'ACCEPTED'),
+          kingdom: 'Animalia',
+          parentKey: typeof item.parentKey === 'number' ? item.parentKey : parentMemberKey,
+          turkishName: inlineNames.trName,
+          englishName: inlineNames.enName,
+          description: `${effectiveParent.scientificName} altındaki GBIF Backbone doğrulamalı ${translateTaxonRankTr(childRank).toLowerCase()} grubu${numDescendants > 0 ? ` (${numDescendants.toLocaleString('tr-TR')} alt takson)` : ''}${isExtinct ? ' — fosil / soyu tükenmiş' : ''}.`,
+          dataSource: 'GBIF Backbone Taxonomy',
+          matchType: 'VERIFIED_SUBGROUP',
+          isVerified: true,
+          isExtinct,
+          canDrillDown: ['KINGDOM', 'PHYLUM', 'CLASS', 'ORDER', 'FAMILY'].includes(childRank) && childRank !== 'GENUS',
+          ...(Array.isArray(item.vernacularNames) ? { _hasInlineGbifChecked: true } : {}),
+          _numDescendants: numDescendants,
+        } as TaxonGroupCandidate & { _numDescendants?: number };
+      }
+    );
+
+    const combinedChildrenMap = new Map<number, TaxonGroupCandidate>();
+    for (const [k, g] of existingChildByKey.entries()) {
+      combinedChildrenMap.set(k, g);
+    }
+    for (const g of newChildCandidates) {
+      const k = g.acceptedUsageKey || g.taxonKeys?.[0];
+      if (k && !combinedChildrenMap.has(k)) {
+        combinedChildrenMap.set(k, g);
+      }
+    }
+
+    const anyCursorHasError = cursors.some(c => c.hasError);
+    const anyCursorHasMore = cursors.some(c => !c.endOfRecords && !c.hasError);
+    const anyCursorHitOffsetLimit = cursors.some(c => c.hitOffsetLimit);
+    const firstCursorErr = cursors.find(c => c.hasError && c.errorMessage)?.errorMessage;
+    const totalMatchedCount = cursors.every(c => typeof c.apiTotalCount === 'number')
+      ? cursors.reduce((acc, c) => acc + (c.apiTotalCount || 0), 0)
+      : cursors.some(c => typeof c.apiTotalCount === 'number')
+        ? cursors.reduce((acc, c) => acc + (c.apiTotalCount || 0), 0)
+        : null;
+
+    if (combinedChildrenMap.size === 0) {
+      const emptyPagination: SubgroupPaginationMeta = {
+        parentGroup: effectiveParent,
+        hasMore: anyCursorHasMore,
+        loadedCount: 1,
+        totalMatchedCount,
+        offsetLimitReached: anyCursorHitOffsetLimit,
+        hasError: anyCursorHasError,
+        errorMessage: firstCursorErr,
+        cursors,
+      };
+      return {
+        groups: [effectiveParent],
+        pagination: emptyPagination,
+      };
+    }
+
+    // Gözlemlerden ve ülkeden bağımsız deterministik sıralama: yaşayan/belirtilmemiş taksonlar önce, ardından alt takson zenginliği azalan ve alfabetik
+    const sortedChildren = Array.from(combinedChildrenMap.values()).sort((a, b) => {
+      const extA = a.isExtinct ? 1 : 0;
+      const extB = b.isExtinct ? 1 : 0;
+      if (extA !== extB) return extA - extB;
+      const descA = Number((a as any)._numDescendants || 0);
+      const descB = Number((b as any)._numDescendants || 0);
+      if (descB !== descA) return descB - descA;
+      return a.scientificName.localeCompare(b.scientificName, 'en');
+    });
+
+    const overviewGroup: TaxonGroupCandidate =
+      existingResult?.groups?.find(g => g.isParentOverview) || {
+        ...effectiveParent,
+        isParentOverview: true,
+        canDrillDown: false,
+        label: effectiveParent.label.startsWith('Tümü')
+          ? effectiveParent.label
+          : `Tümü — ${effectiveParent.label}`,
+      };
+
+    // İlk yüklemede yalnızca ilk 10 alt grubu zenginleştir; "Tümünü Göster" / devam sayfalarında mevcut etiketleri koru
+    const enrichedChildren = existingResult
+      ? sortedChildren
+      : await enrichSubgroupLabels(sortedChildren, 0, 10);
+    const finalSubgroups = [overviewGroup, ...enrichedChildren];
+
+    const pagination: SubgroupPaginationMeta = {
+      parentGroup: effectiveParent,
+      hasMore: anyCursorHasMore || anyCursorHasError,
+      loadedCount: finalSubgroups.length,
+      totalMatchedCount,
+      offsetLimitReached: anyCursorHitOffsetLimit,
+      hasError: anyCursorHasError,
+      errorMessage: firstCursorErr,
+      cursors,
+    };
+
+    const result: TaxonSubgroupExpansionResult = {
+      groups: finalSubgroups,
+      pagination,
+    };
+
+    if (!anyCursorHasError && !anyCursorHasMore && !anyCursorHitOffsetLimit) {
+      setCached(cacheKey, result, 15 * 60 * 1000);
+    }
+    return result;
   });
+}
 
-  const overviewGroup: TaxonGroupCandidate = {
-    ...parentGroup,
-    isParentOverview: true,
-    canDrillDown: false,
-    label: parentGroup.label.startsWith('Tümü')
-      ? parentGroup.label
-      : `Tümü — ${parentGroup.label}`,
-  };
-
-  // İlk sayfa alt gruplarının (en fazla 20 tanesinin) Türkçe/İngilizce etiketlerini iNaturalist + GBIF ile zenginleştir
-  const enrichedChildren = await enrichSubgroupLabels(childCandidates, 0, 20);
-  const finalSubgroups = [overviewGroup, ...enrichedChildren];
-  setCached(cacheKey, finalSubgroups, 15 * 60 * 1000);
-  return finalSubgroups;
+export async function expandTaxonCandidateToSubgroups(
+  parentGroup: TaxonGroupCandidate,
+  countryCode: string = 'TR'
+): Promise<TaxonGroupCandidate[]> {
+  const res = await expandTaxonCandidateToSubgroupsPaged(parentGroup, { countryCode });
+  return res.groups;
 }
 
 function scoreHigherTaxonCommonMatch(candidateName: string | undefined, query: string): number {
@@ -4459,29 +5440,37 @@ function scoreHigherTaxonCommonMatch(candidateName: string | undefined, query: s
   if (!queryFold || queryFold.length < 2) return 0;
   if (candLower === queryLower || candFold === queryFold) return 100;
 
-  const escaped = queryFold.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pluralRegex = new RegExp(`^${escaped}(?:lar|ler|giller|lari|leri|s|es)$`, 'i');
+  const queryForms = Array.from(new Set(stripCommonPlurals(queryFold)));
+  const stemPatterns = queryForms.map(f => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const combinedStem = `(?:${stemPatterns.join('|')})`;
+
+  const pluralRegex = new RegExp(`^${combinedStem}(?:lar|ler|giller|lari|leri|s|es)?$`, 'i');
   if (pluralRegex.test(candFold)) return 96;
 
   // "Kelebekler ve Güveler", "Yusufçuklar ve Kızböcekleri" gibi çoklu başlıklar
-  const headPluralRegex = new RegExp(`(?:^|\\s|,)\\s*${escaped}(?:lar|ler|giller|lari|leri|s|es)(?:$|\\s|,)`, 'i');
-  if (headPluralRegex.test(candFold)) return 90;
+  const headPluralRegex = new RegExp(`(?:^|\\s|,)\\s*${combinedStem}(?:lar|ler|giller|lari|leri|s|es)?(?:$|\\s|,)`, 'i');
+  if (headPluralRegex.test(candFold)) {
+    const candWordsEarly = candFold.split(/[\s,/-]+/).filter(Boolean);
+    const isExactConjunctionHead =
+      candWordsEarly.length >= 3 &&
+      (candWordsEarly[1] === 've' || candWordsEarly[1] === '&') &&
+      pluralRegex.test(candWordsEarly[0]);
+    if (isExactConjunctionHead || candWordsEarly.length <= 2) return 92;
+  }
 
-  const baseScore = scoreCommonNameMatch(candidateName, query);
+  const baseScore = Math.max(...queryForms.map(f => scoreCommonNameMatch(candidateName, f)));
   if (baseScore >= 95) return baseScore;
 
   const candWords = candFold.split(/[\s,/-]+/).filter(Boolean);
   if (candWords.length >= 2) {
-    const queryWords = queryFold.split(/\s+/).filter(Boolean);
-    const hasExactOrPluralWord = candWords.some(
-      w => queryWords.includes(w) || new RegExp(`^${escaped}(?:lar|ler|giller|s|es)$`, 'i').test(w)
-    );
+    const hasExactOrPluralWord = candWords.some(w => pluralRegex.test(w));
     // Örn: "Balık Kartalı" veya "Baykuş Güveleri" veya "Yalancı akrepler" -> sorgu yalnızca niteleyici ise skoru düşük tut
     if (hasExactOrPluralWord) {
+      const firstWord = candWords[0];
       const lastWord = candWords[candWords.length - 1];
-      const isLastWordHead =
-        queryWords.includes(lastWord) ||
-        new RegExp(`^${escaped}(?:lar|ler|giller|s|es)$`, 'i').test(lastWord);
+      const isConjunctionHead = candWords.length >= 3 && (candWords[1] === 've' || candWords[1] === '&') && pluralRegex.test(firstWord);
+      if (isConjunctionHead) return 92;
+      const isLastWordHead = pluralRegex.test(lastWord);
       return isLastWordHead ? 78 : 55;
     }
   }
@@ -4515,190 +5504,255 @@ async function resolveDynamicHigherTaxonGroups(
   countryCode: string = 'TR'
 ): Promise<{
   groups: TaxonGroupCandidate[];
+  subgroupPagination?: SubgroupPaginationMeta;
   unresolvedGroups: Array<{ scientificName: string; reason: string }>;
+  hasPartialError?: boolean;
 }> {
   const clean = normalizeSearchQuery(query);
   const cleanCountry = normalizeDiscoveryCountryCode(countryCode);
-  const cacheKey = `dynamic-groups:v3:${toTrLower(clean)}:${cleanCountry || 'GLOBAL'}`;
+  const cacheKey = `dynamic-groups:v5:${toTrLower(clean)}:${cleanCountry || 'GLOBAL'}`;
   const cached = getCached<{
     groups: TaxonGroupCandidate[];
+    subgroupPagination?: SubgroupPaginationMeta;
     unresolvedGroups: Array<{ scientificName: string; reason: string }>;
+    hasPartialError?: boolean;
   }>(cacheKey);
   if (cached) return cached;
 
-  const [inatTr, inatEn, gbifVern] = await Promise.allSettled([
-    fetchWithRetry(`https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(clean)}&locale=tr&per_page=12`, undefined, 1, 6000).then(r => r.json()),
-    fetchWithRetry(`https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(clean)}&locale=en&per_page=12`, undefined, 1, 6000).then(r => r.json()),
-    fetchWithRetry(`https://api.gbif.org/v1/species/search?datasetKey=${GBIF_BACKBONE_DATASET_KEY}&q=${encodeURIComponent(clean)}&qField=VERNACULAR&status=ACCEPTED&limit=12`, undefined, 1, 6000).then(r => r.json()),
-  ]);
+  return runDedupedInFlight(`in-flight:${cacheKey}`, async () => {
+    const cleanLower = toTrLower(clean);
+    const singularStem = stripCommonPlurals(cleanLower).find(v => v !== cleanLower);
 
-  const rawCandidates = new Map<string, { sci: string; rank: string; iconic: string; commonName?: string; score: number }>();
+    const [inatTr, inatEn, gbifVern, inatTrStem] = await Promise.allSettled([
+      fetchSafeJson<{ results?: any[] }>(`https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(clean)}&taxon_id=1&locale=tr&per_page=15`, 'iNaturalist Autocomplete (TR)', 1, 6000),
+      fetchSafeJson<{ results?: any[] }>(`https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(clean)}&taxon_id=1&locale=en&per_page=15`, 'iNaturalist Autocomplete (EN)', 1, 6000),
+      fetchSafeJson<{ results?: any[] }>(`https://api.gbif.org/v1/species/search?datasetKey=${GBIF_BACKBONE_DATASET_KEY}&q=${encodeURIComponent(clean)}&qField=VERNACULAR&status=ACCEPTED&limit=12`, 'GBIF Vernacular Higher Taxon Search', 1, 6000),
+      singularStem
+        ? fetchSafeJson<{ results?: any[] }>(`https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(singularStem)}&taxon_id=1&locale=tr&per_page=15`, 'iNaturalist Autocomplete Stem (TR)', 1, 6000)
+        : Promise.resolve<SafeJsonParseResult<{ results?: any[] }>>({ ok: true, status: 200, data: { results: [] } }),
+    ]);
 
-  for (const src of [inatTr, inatEn]) {
-    if (src.status !== 'fulfilled' || !Array.isArray(src.value?.results)) continue;
-    for (const t of src.value.results) {
-      if (!t || !t.name || !t.rank) continue;
-      const iconic = String(t.iconic_taxon_name || '').toLowerCase();
-      if (!ANIMAL_INAT_ICONIC_TAXA.has(iconic)) continue;
+    const inatTrOk = inatTr.status === 'fulfilled' && inatTr.value.ok && Array.isArray(inatTr.value.data?.results);
+    const inatEnOk = inatEn.status === 'fulfilled' && inatEn.value.ok && Array.isArray(inatEn.value.data?.results);
+    const gbifVernOk = gbifVern.status === 'fulfilled' && gbifVern.value.ok && Array.isArray(gbifVern.value.data?.results);
+    const hasAnySourceError = !inatTrOk || !inatEnOk || !gbifVernOk;
+    const firstSourceErrorMsg =
+      (!inatTrOk && (inatTr.status === 'fulfilled' ? inatTr.value.errorMessage : inatTr.reason?.message)) ||
+      (!inatEnOk && (inatEn.status === 'fulfilled' ? inatEn.value.errorMessage : inatEn.reason?.message)) ||
+      (!gbifVernOk && (gbifVern.status === 'fulfilled' ? gbifVern.value.errorMessage : gbifVern.reason?.message)) ||
+      undefined;
 
-      const rankLower = String(t.rank).toLowerCase();
-      if (!['genus', 'subfamily', 'family', 'superfamily', 'order', 'infraorder', 'suborder', 'class', 'subclass', 'phylum', 'kingdom'].includes(rankLower)) {
-        continue;
-      }
+    const rawCandidates = new Map<string, { sci: string; rank: string; iconic: string; commonName?: string; score: number }>();
 
-      const bestNameScore = Math.max(
-        scoreHigherTaxonCommonMatch(t.preferred_common_name, clean),
-        scoreHigherTaxonCommonMatch(t.english_common_name, clean),
-        scoreHigherTaxonCommonMatch(t.matched_term, clean)
-      );
-      if (bestNameScore < 65) continue;
+    const inatSourceEntries: Array<{ res: typeof inatTr; isTurkishLocale: boolean }> = [
+      { res: inatTr, isTurkishLocale: true },
+      { res: inatTrStem, isTurkishLocale: true },
+      { res: inatEn, isTurkishLocale: false },
+    ];
 
-      // Broad biological higher ranks (order/family/class) get a gentle structural bonus over narrow sub-ranks when name score ties
-      const rankBonus = ['class', 'order', 'family'].includes(rankLower) ? 8 : rankLower === 'phylum' ? 4 : 0;
-      const sciKey = String(t.name).toLowerCase();
-      const obsBonus = Math.min(20, Math.log10(Math.max(1, Number(t.observations_count || 1))) * 3);
-      const totalScore = bestNameScore + obsBonus + rankBonus;
-      const existing = rawCandidates.get(sciKey);
-      if (!existing || totalScore > existing.score) {
-        rawCandidates.set(sciKey, {
-          sci: t.name,
-          rank: rankLower.toUpperCase(),
-          iconic,
-          commonName: t.preferred_common_name || t.english_common_name,
-          score: totalScore,
-        });
-      }
-    }
-  }
+    for (const { res: src, isTurkishLocale } of inatSourceEntries) {
+      if (src.status !== 'fulfilled' || !src.value.ok || !Array.isArray(src.value.data?.results)) continue;
+      for (const t of src.value.data.results) {
+        if (!t || !t.name || !t.rank) continue;
+        const iconic = String(t.iconic_taxon_name || '').toLowerCase();
+        if (!ANIMAL_INAT_ICONIC_TAXA.has(iconic)) continue;
 
-  // Fallback: GBIF Backbone VERNACULAR üzerinden üst takson adayları (iNaturalist yetersiz kalırsa)
-  if (rawCandidates.size === 0 && gbifVern.status === 'fulfilled' && Array.isArray(gbifVern.value?.results)) {
-    for (const r of gbifVern.value.results) {
-      if (!r || !r.canonicalName || !r.rank) continue;
-      if (String(r.kingdom || '').toLowerCase() !== 'animalia') continue;
-      const rUpper = String(r.rank).toUpperCase();
-      if (!HIGHER_TAXON_RANKS.has(rUpper)) continue;
-      const vernList: Array<{ vernacularName?: string; language?: string }> = Array.isArray(r.vernacularNames) ? r.vernacularNames : [];
-      let bestScore = 0;
-      let matchedCommon = '';
-      for (const v of vernList) {
-        if (!v?.vernacularName) continue;
-        const sc = scoreHigherTaxonCommonMatch(v.vernacularName, clean);
-        if (sc > bestScore) {
-          bestScore = sc;
-          matchedCommon = v.vernacularName;
+        const rankLower = String(t.rank).toLowerCase();
+        if (!['genus', 'subfamily', 'family', 'superfamily', 'order', 'infraorder', 'suborder', 'class', 'subclass', 'phylum', 'kingdom'].includes(rankLower)) {
+          continue;
         }
-      }
-      if (bestScore >= 75) {
-        const sciKey = String(r.canonicalName).toLowerCase();
-        if (!rawCandidates.has(sciKey)) {
+
+        const prefScore = scoreHigherTaxonCommonMatch(t.preferred_common_name, clean);
+        const engScore = scoreHigherTaxonCommonMatch(t.english_common_name, clean);
+        const matchedScore = scoreHigherTaxonCommonMatch(t.matched_term, clean);
+        const bestNameScore = Math.max(prefScore, engScore, matchedScore);
+        if (bestNameScore < 65) continue;
+
+        const trPrefBonus =
+          isTurkishLocale &&
+          prefScore >= 90 &&
+          t.preferred_common_name &&
+          t.preferred_common_name !== t.english_common_name
+            ? 8
+            : 0;
+
+        // Broad biological higher ranks (order/family/class) get a gentle structural bonus over narrow sub-ranks when name score ties
+        const rankBonus = ['class', 'order', 'family'].includes(rankLower) ? 8 : rankLower === 'phylum' ? 4 : 0;
+        const sciKey = String(t.name).toLowerCase();
+        const obsBonus = Math.min(20, Math.log10(Math.max(1, Number(t.observations_count || 1))) * 3);
+        const totalScore = bestNameScore + trPrefBonus + obsBonus + rankBonus;
+        const existing = rawCandidates.get(sciKey);
+        if (!existing || totalScore > existing.score) {
           rawCandidates.set(sciKey, {
-            sci: r.canonicalName,
-            rank: rUpper,
-            iconic: String(r.class || '').toLowerCase(),
-            commonName: matchedCommon,
-            score: bestScore,
+            sci: t.name,
+            rank: rankLower.toUpperCase(),
+            iconic,
+            commonName: t.preferred_common_name || t.english_common_name,
+            score: totalScore,
           });
         }
       }
     }
-  }
 
-  const allCands = Array.from(rawCandidates.values()).sort((a, b) => b.score - a.score);
-  // Eğer yüksek güvenli (>= 90 name+rank+obs -> ~105+) tam/çoğul eşleşme varsa, zayıf niteleyici gürültüsünü (ör. "Baykuş Güveleri" veya "Balık Kartalı") baskıla
-  const topScore = allCands[0]?.score || 0;
-  const filteredCands = allCands.filter(c => topScore < 105 || c.score >= topScore - 26).slice(0, 6);
-
-  const primaryGroups: TaxonGroupCandidate[] = [];
-  const unresolvedGroups: Array<{ scientificName: string; reason: string }> = [];
-
-  if (filteredCands.length > 0) {
-    const settled = await runWithConcurrencyLimit(filteredCands, DISCOVERY_CONCURRENCY_LIMIT, async (cand) => {
-      const gbifExactRanks = new Set(['KINGDOM', 'PHYLUM', 'CLASS', 'ORDER', 'FAMILY', 'GENUS']);
-      const gbifRank = gbifExactRanks.has(cand.rank) ? cand.rank : undefined;
-      const verified = await verifyHigherTaxonWithGbifBackbone(cand.sci, gbifRank);
-      return { cand, verified };
-    });
-
-    const seenAccKeys = new Set<number>();
-    for (const s of settled) {
-      if (s.status !== 'fulfilled') continue;
-      const { cand, verified } = s.value;
-      if (!verified.verified || !verified.acceptedUsageKey) {
-        unresolvedGroups.push({
-          scientificName: cand.sci,
-          reason: verified.reason || 'GBIF Backbone üzerinde doğrulanamadı.',
-        });
-        continue;
+    // Fallback: GBIF Backbone VERNACULAR üzerinden üst takson adayları (iNaturalist yetersiz kalırsa; soyu tükenmiş/fosil üst taksonları tercih etmez)
+    if (rawCandidates.size === 0 && gbifVernOk && gbifVern.status === 'fulfilled' && Array.isArray(gbifVern.value.data?.results)) {
+      for (const r of gbifVern.value.data.results) {
+        if (!r || !r.canonicalName || !r.rank) continue;
+        if (String(r.kingdom || '').toLowerCase() !== 'animalia') continue;
+        if (r.extinct === true) continue;
+        const rUpper = String(r.rank).toUpperCase();
+        if (!HIGHER_TAXON_RANKS.has(rUpper)) continue;
+        const vernList: Array<{ vernacularName?: string; language?: string }> = Array.isArray(r.vernacularNames) ? r.vernacularNames : [];
+        let bestScore = 0;
+        let matchedCommon = '';
+        for (const v of vernList) {
+          if (!v?.vernacularName) continue;
+          const sc = scoreHigherTaxonCommonMatch(v.vernacularName, clean);
+          if (sc > bestScore) {
+            bestScore = sc;
+            matchedCommon = v.vernacularName;
+          }
+        }
+        if (bestScore >= 75) {
+          const sciKey = String(r.canonicalName).toLowerCase();
+          if (!rawCandidates.has(sciKey)) {
+            rawCandidates.set(sciKey, {
+              sci: r.canonicalName,
+              rank: rUpper,
+              iconic: String(r.class || '').toLowerCase(),
+              commonName: matchedCommon,
+              score: bestScore,
+            });
+          }
+        }
       }
+    }
 
-      const verifiedRankUpper = String(verified.rank || '').toUpperCase();
-      // iNaturalist ara basamağı (SUBORDER/SUBCLASS/SUPERFAMILY) GBIF Backbone'da mevcut olmayıp üst sınıfa (HIGHERRANK) düştüyse reddet (ör. Anisoptera -> Insecta)
-      if (
-        !verified.synonymOf &&
-        String(verified.matchType || '').toUpperCase() === 'HIGHERRANK' &&
-        String(verified.canonicalName || '').toLowerCase() !== cand.sci.toLowerCase()
-      ) {
-        continue;
-      }
-      // iNaturalist ara basamağı GBIF'te yanlışlıkla bir GENUS homonimine (ör. Theria güve cinsi) düştüyse reddet!
-      if (cand.rank !== 'GENUS' && verifiedRankUpper === 'GENUS') {
-        continue;
-      }
-      if (!isInatIconicCompatibleWithGbifClass(cand.iconic, verified.class, verified.kingdom)) {
-        continue;
-      }
+    const allCands = Array.from(rawCandidates.values()).sort((a, b) => b.score - a.score);
+    // Eğer yüksek güvenli (>= 90 name+rank+obs -> ~105+) tam/çoğul eşleşme varsa, zayıf niteleyici gürültüsünü baskıla
+    const topScore = allCands[0]?.score || 0;
+    const filteredCands = allCands.filter(c => topScore < 105 || c.score >= topScore - 26).slice(0, 4);
 
-      if (seenAccKeys.has(verified.acceptedUsageKey)) continue;
-      seenAccKeys.add(verified.acceptedUsageKey);
+    const primaryGroups: TaxonGroupCandidate[] = [];
+    const unresolvedGroups: Array<{ scientificName: string; reason: string }> = [];
+    let hasVerificationError = false;
+    let lastVerificationError: string | undefined;
 
-      primaryGroups.push({
-        id: `dyn-${verified.acceptedUsageKey}`,
-        label: cand.commonName
-          ? `${cand.commonName} (${verified.canonicalName || cand.sci})`
-          : `${verified.canonicalName || cand.sci} (${translateTaxonRankTr(verifiedRankUpper)})`,
-        scientificName: verified.canonicalName || cand.sci,
-        usageKey: verified.usageKey,
-        acceptedUsageKey: verified.acceptedUsageKey,
-        taxonKeys: [verified.acceptedUsageKey],
-        rank: verifiedRankUpper || cand.rank,
-        taxonomicStatus: verified.taxonomicStatus || 'ACCEPTED',
-        kingdom: verified.kingdom || 'Animalia',
-        parentKey: verified.parentKey,
-        turkishName: cand.commonName,
-        dataSource: 'GBIF Backbone Taxonomy (Dinamik Takson Keşfi)',
-        matchType: verified.matchType || 'EXACT',
-        isVerified: true,
-        canDrillDown: ['KINGDOM', 'PHYLUM', 'CLASS', 'ORDER', 'FAMILY'].includes(verifiedRankUpper),
+    if (filteredCands.length > 0) {
+      const settled = await runWithConcurrencyLimit(filteredCands, DISCOVERY_CONCURRENCY_LIMIT, async (cand) => {
+        const gbifExactRanks = new Set(['KINGDOM', 'PHYLUM', 'CLASS', 'ORDER', 'FAMILY', 'GENUS']);
+        const gbifRank = gbifExactRanks.has(cand.rank) ? cand.rank : undefined;
+        const verified = await verifyHigherTaxonWithGbifBackbone(cand.sci, gbifRank);
+        return { cand, verified };
       });
-    }
-  }
 
-  // En güçlü birincil üst taksonu GBIF Backbone hiyerarşisi üzerinden gerçek biyolojik alt gruplarına ayır!
-  let finalGroups: TaxonGroupCandidate[] = primaryGroups;
-  if (primaryGroups.length > 0) {
-    const primary = primaryGroups[0];
-    const expanded = await expandTaxonCandidateToSubgroups(primary, cleanCountry);
-    const seenKeys = new Set<number>();
-    const merged: TaxonGroupCandidate[] = [];
+      const seenAccKeys = new Set<number>();
+      for (const s of settled) {
+        if (s.status !== 'fulfilled') {
+          hasVerificationError = true;
+          if (!lastVerificationError) {
+            lastVerificationError = s.reason?.message || 'GBIF Backbone doğrulama isteği başarısız oldu.';
+          }
+          continue;
+        }
+        const { cand, verified } = s.value;
+        if (verified.status === 'ERROR') {
+          hasVerificationError = true;
+          if (!lastVerificationError) {
+            lastVerificationError = verified.errorMessage || verified.reason;
+          }
+        }
+        if (!verified.verified || !verified.acceptedUsageKey) {
+          unresolvedGroups.push({
+            scientificName: cand.sci,
+            reason: verified.reason || 'GBIF Backbone üzerinde doğrulanamadı.',
+          });
+          continue;
+        }
 
-    for (const g of expanded) {
-      const k = g.acceptedUsageKey || g.taxonKeys?.[0];
-      if (k) seenKeys.add(k);
-      merged.push(g);
-    }
-    for (const extra of primaryGroups.slice(1)) {
-      const k = extra.acceptedUsageKey || extra.taxonKeys?.[0];
-      if (k && seenKeys.has(k)) continue;
-      if (k) seenKeys.add(k);
-      merged.push(extra);
-    }
-    finalGroups = merged;
-  }
+        const verifiedRankUpper = String(verified.rank || '').toUpperCase();
+        // iNaturalist ara basamağı (SUBORDER/SUBCLASS/SUPERFAMILY) GBIF Backbone'da mevcut olmayıp üst sınıfa (HIGHERRANK) düştüyse reddet
+        if (
+          !verified.synonymOf &&
+          String(verified.matchType || '').toUpperCase() === 'HIGHERRANK' &&
+          String(verified.canonicalName || '').toLowerCase() !== cand.sci.toLowerCase()
+        ) {
+          continue;
+        }
+        // iNaturalist ara basamağı GBIF'te yanlışlıkla bir GENUS homonimine düştüyse reddet
+        if (cand.rank !== 'GENUS' && verifiedRankUpper === 'GENUS') {
+          continue;
+        }
+        if (!isInatIconicCompatibleWithGbifClass(cand.iconic, verified.class, verified.kingdom)) {
+          continue;
+        }
 
-  const res = { groups: finalGroups, unresolvedGroups };
-  setCached(cacheKey, res, 15 * 60 * 1000);
-  return res;
+        if (seenAccKeys.has(verified.acceptedUsageKey)) continue;
+        seenAccKeys.add(verified.acceptedUsageKey);
+
+        primaryGroups.push({
+          id: `dyn-${verified.acceptedUsageKey}`,
+          label: cand.commonName
+            ? `${cand.commonName} (${verified.canonicalName || cand.sci})`
+            : `${verified.canonicalName || cand.sci} (${translateTaxonRankTr(verifiedRankUpper)})`,
+          scientificName: verified.canonicalName || cand.sci,
+          usageKey: verified.usageKey,
+          acceptedUsageKey: verified.acceptedUsageKey,
+          taxonKeys: [verified.acceptedUsageKey],
+          rank: verifiedRankUpper || cand.rank,
+          taxonomicStatus: verified.taxonomicStatus || 'ACCEPTED',
+          kingdom: verified.kingdom || 'Animalia',
+          parentKey: verified.parentKey,
+          turkishName: cand.commonName,
+          dataSource: 'GBIF Backbone Taxonomy (Dinamik Takson Keşfi)',
+          matchType: verified.matchType || 'EXACT',
+          isVerified: true,
+          canDrillDown: ['KINGDOM', 'PHYLUM', 'CLASS', 'ORDER', 'FAMILY'].includes(verifiedRankUpper),
+        });
+      }
+    }
+
+    // En güçlü birincil üst taksonu GBIF Backbone hiyerarşisi üzerinden gerçek biyolojik alt gruplarına ayır!
+    let finalGroups: TaxonGroupCandidate[] = primaryGroups;
+    let subgroupPagination: SubgroupPaginationMeta | undefined;
+    if (primaryGroups.length > 0) {
+      const primary = primaryGroups[0];
+      const expandedRes = await expandTaxonCandidateToSubgroupsPaged(primary, { countryCode: cleanCountry });
+      subgroupPagination = expandedRes.pagination;
+      const seenKeys = new Set<number>();
+      const merged: TaxonGroupCandidate[] = [];
+
+      for (const g of expandedRes.groups) {
+        const k = g.acceptedUsageKey || g.taxonKeys?.[0];
+        if (k) seenKeys.add(k);
+        merged.push(g);
+      }
+      for (const extra of primaryGroups.slice(1)) {
+        const k = extra.acceptedUsageKey || extra.taxonKeys?.[0];
+        if (k && seenKeys.has(k)) continue;
+        if (k) seenKeys.add(k);
+        merged.push(extra);
+      }
+      finalGroups = merged;
+    }
+
+    const hasPartialError = hasAnySourceError || hasVerificationError || Boolean(subgroupPagination?.hasError);
+    const res = { groups: finalGroups, subgroupPagination, unresolvedGroups, hasPartialError };
+    if (finalGroups.length === 0 && hasPartialError) {
+      if (!inatTrOk && !inatEnOk && !gbifVernOk) {
+        throw new Error(firstSourceErrorMsg || 'iNaturalist ve GBIF taksonomi servislerinden geçerli yanıt alınamadı.');
+      }
+      throw new Error(
+        lastVerificationError ||
+          firstSourceErrorMsg ||
+          'Taksonomi keşif kaynaklarından birine geçici olarak erişilemedi.'
+      );
+    }
+    if (!hasPartialError && !subgroupPagination?.hasMore) {
+      setCached(cacheKey, res, 15 * 60 * 1000);
+    }
+    return res;
+  });
 }
 
 function normalizeDiscoveryCountryCode(countryCode?: string): string {
@@ -4757,7 +5811,7 @@ export async function resolveSearchIntent(
       : null;
   const groupProfile = directGroupProfile || parentheticalGroupProfile;
   if (groupProfile) {
-    const { groups, unresolvedGroups } = await resolveProfileToTaxonGroups(groupProfile);
+    const { groups, unresolvedGroups, hasApiError, apiErrorMessage } = await resolveProfileToTaxonGroups(groupProfile);
     const verifiedGroups = groups.filter(g => g.isVerified);
     if (verifiedGroups.length > 0) {
       const intentRes: SearchIntentResult = {
@@ -4768,8 +5822,13 @@ export async function resolveSearchIntent(
         activeGroupId: verifiedGroups[0].id,
         unresolvedGroups: unresolvedGroups.length > 0 ? unresolvedGroups : undefined,
       };
-      setCached(cacheKey, intentRes, 15 * 60 * 1000);
+      if (!hasApiError) {
+        setCached(cacheKey, intentRes, 15 * 60 * 1000);
+      }
       return intentRes;
+    }
+    if (hasApiError) {
+      throw new Error(apiErrorMessage || 'GBIF Backbone taksonomi doğrulama servisine erişilemedi.');
     }
     return {
       mode: 'NOT_FOUND',
@@ -4789,6 +5848,9 @@ export async function resolveSearchIntent(
     const higherCheck = await verifyHigherTaxonWithGbifBackbone(
       words[0].charAt(0).toUpperCase() + words[0].slice(1).toLowerCase()
     );
+    if (higherCheck.status === 'ERROR') {
+      throw new Error(higherCheck.errorMessage || higherCheck.reason || 'GBIF Backbone taksonomi doğrulama servisine erişilemedi.');
+    }
     if (
       higherCheck.verified &&
       higherCheck.acceptedUsageKey &&
@@ -4812,21 +5874,27 @@ export async function resolveSearchIntent(
         isVerified: true,
         canDrillDown: ['KINGDOM', 'PHYLUM', 'CLASS', 'ORDER', 'FAMILY'].includes(rankUpper),
       };
-      const expandedGroups = await expandTaxonCandidateToSubgroups(baseTaxonGroup, cleanCountry);
+      const expandedRes = await expandTaxonCandidateToSubgroupsPaged(baseTaxonGroup, { countryCode: cleanCountry });
       const intentRes: SearchIntentResult = {
         mode: 'TAXON_GROUP_DISCOVERY',
         query: normalizedInput,
         countryCode: cleanCountry,
-        groups: expandedGroups,
-        activeGroupId: expandedGroups[0].id,
+        groups: expandedRes.groups,
+        activeGroupId: expandedRes.groups[0].id,
+        subgroupPagination: expandedRes.pagination,
       };
-      setCached(cacheKey, intentRes, 15 * 60 * 1000);
+      if (!expandedRes.pagination.hasError && !expandedRes.pagination.hasMore) {
+        setCached(cacheKey, intentRes, 15 * 60 * 1000);
+      }
       return intentRes;
     }
 
     // Üst takson değilse, genel grup kelimesi değilse ve spesifik yaygın ad sözlüğünde varsa tekil tür olarak çöz
     if (!isGeneralGroupWord && Boolean(lookupCommonSpeciesEntry(normalizedInput))) {
       const speciesMatch = await matchSpecies(normalizedInput);
+      if (speciesMatch.matchType === 'ERROR') {
+        throw new Error(speciesMatch.summary || 'GBIF taksonomi doğrulama servisine erişilemedi.');
+      }
       if (speciesMatch.isMatched && speciesMatch.usageKey && (!speciesMatch.rank || SPECIES_LEVEL_RANKS.has(speciesMatch.rank.toUpperCase()))) {
         const singleRes: SearchIntentResult = {
           mode: 'SINGLE_SPECIES',
@@ -4845,6 +5913,9 @@ export async function resolveSearchIntent(
   const commonSpecific = !isGeneralGroupWord ? lookupCommonSpeciesEntry(normalizedInput) : null;
   if (commonSpecific || hasExplicitBinomialInParens || (words.length >= 2 && !isGeneralGroupWord)) {
     const speciesMatch = await matchSpecies(normalizedInput);
+    if (speciesMatch.matchType === 'ERROR') {
+      throw new Error(speciesMatch.summary || 'GBIF taksonomi doğrulama servisine erişilemedi.');
+    }
     if (speciesMatch.isMatched && speciesMatch.usageKey) {
       const rankUpper = (speciesMatch.rank || 'SPECIES').toUpperCase();
       if (SPECIES_LEVEL_RANKS.has(rankUpper)) {
@@ -4873,15 +5944,18 @@ export async function resolveSearchIntent(
           isVerified: true,
           canDrillDown: ['KINGDOM', 'PHYLUM', 'CLASS', 'ORDER', 'FAMILY'].includes(rankUpper),
         };
-        const expandedGroups = await expandTaxonCandidateToSubgroups(baseGroupCand, cleanCountry);
+        const expandedRes = await expandTaxonCandidateToSubgroupsPaged(baseGroupCand, { countryCode: cleanCountry });
         const groupRes: SearchIntentResult = {
           mode: 'TAXON_GROUP_DISCOVERY',
           query: normalizedInput,
           countryCode: cleanCountry,
-          groups: expandedGroups,
-          activeGroupId: expandedGroups[0].id,
+          groups: expandedRes.groups,
+          activeGroupId: expandedRes.groups[0].id,
+          subgroupPagination: expandedRes.pagination,
         };
-        setCached(cacheKey, groupRes, 15 * 60 * 1000);
+        if (!expandedRes.pagination.hasError && !expandedRes.pagination.hasMore) {
+          setCached(cacheKey, groupRes, 15 * 60 * 1000);
+        }
         return groupRes;
       }
     }
@@ -4896,14 +5970,20 @@ export async function resolveSearchIntent(
       countryCode: cleanCountry,
       groups: dynamicGroups.groups,
       activeGroupId: dynamicGroups.groups[0].id,
+      subgroupPagination: dynamicGroups.subgroupPagination,
       unresolvedGroups: dynamicGroups.unresolvedGroups.length > 0 ? dynamicGroups.unresolvedGroups : undefined,
     };
-    setCached(cacheKey, dynRes, 15 * 60 * 1000);
+    if (!dynamicGroups.hasPartialError && !dynamicGroups.subgroupPagination?.hasMore) {
+      setCached(cacheKey, dynRes, 15 * 60 * 1000);
+    }
     return dynRes;
   }
 
   // 5. Son tekil tür doğrulama denemesi (matchSpecies tüm Animalia koruma kurallarını uygular)
   const fallbackMatch = await matchSpecies(normalizedInput);
+  if (fallbackMatch.matchType === 'ERROR') {
+    throw new Error(fallbackMatch.summary || 'GBIF taksonomi doğrulama servisine erişilemedi.');
+  }
   if (fallbackMatch.isMatched && fallbackMatch.usageKey) {
     const rankUpper = (fallbackMatch.rank || 'SPECIES').toUpperCase();
     if (SPECIES_LEVEL_RANKS.has(rankUpper)) {
@@ -4943,17 +6023,6 @@ export interface DiscoverSpeciesOptions {
 }
 
 const GBIF_SPECIES_SEARCH_MAX_OFFSET = 100000;
-const IN_FLIGHT_REQUESTS = new Map<string, Promise<any>>();
-
-function runDedupedInFlight<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const existing = IN_FLIGHT_REQUESTS.get(key);
-  if (existing) return existing;
-  const promise = fn().finally(() => {
-    IN_FLIGHT_REQUESTS.delete(key);
-  });
-  IN_FLIGHT_REQUESTS.set(key, promise);
-  return promise;
-}
 
 interface BackboneTaxonCursor {
   htKey: number;
@@ -4978,6 +6047,8 @@ interface BackboneCatalogPoolState {
   filteredFossilCount: number;
   filteredOutOfGroupCount: number;
   hitOffsetLimit: boolean;
+  serverErrorReached: boolean;
+  catalogErrorMessage?: string;
 }
 
 interface SpeciesEvidenceSummary {
@@ -5003,11 +6074,10 @@ async function fetchSpeciesDetailCached(speciesKey: number): Promise<any | null>
   const cached = getCached<any>(spCacheKey);
   if (cached) return cached;
   return runDedupedInFlight(spCacheKey, async () => {
-    const res = await fetchWithRetry(`https://api.gbif.org/v1/species/${speciesKey}`, undefined, 1, 7000);
-    if (!res.ok) return null;
-    const data = await res.json();
-    setCached(spCacheKey, data, 30 * 60 * 1000);
-    return data;
+    const parsed = await fetchSafeJson<any>(`https://api.gbif.org/v1/species/${speciesKey}`, 'GBIF Species Detail API', 1, 7000);
+    if (!parsed.ok || !parsed.data) return null;
+    setCached(spCacheKey, parsed.data, 30 * 60 * 1000);
+    return parsed.data;
   });
 }
 
@@ -5019,34 +6089,120 @@ async function resolveCanonicalSpeciesTarget(
   const cacheKey = `gbif-canonical-target:v1:${clean.toLowerCase()}`;
   const cached = getCached<any>(cacheKey);
   if (cached) return cached;
-  try {
-    const matchRes = await fetchWithRetry(
-      `https://api.gbif.org/v1/species/match?name=${encodeURIComponent(clean)}&kingdom=Animalia&rank=SPECIES&strict=true`,
-      undefined,
-      1,
-      6000
-    );
-    if (!matchRes.ok) return null;
-    const m = await matchRes.json();
-    const targetKey = Number(m?.acceptedUsageKey || m?.usageKey);
-    if (!targetKey) return null;
-    const detail = await fetchSpeciesDetailCached(targetKey);
-    if (detail?.key) {
-      setCached(cacheKey, detail, 30 * 60 * 1000);
-      return detail;
+  return runDedupedInFlight(`in-flight:${cacheKey}`, async () => {
+    try {
+      const parsed = await fetchSafeJson<any>(
+        `https://api.gbif.org/v1/species/match?name=${encodeURIComponent(clean)}&kingdom=Animalia&rank=SPECIES&strict=true`,
+        'GBIF Canonical Target Match API',
+        1,
+        6000
+      );
+      if (!parsed.ok || !parsed.data) return null;
+      const m = parsed.data;
+      const targetKey = Number(m?.acceptedUsageKey || m?.usageKey);
+      if (!targetKey) return null;
+      const detail = await fetchSpeciesDetailCached(targetKey);
+      if (detail?.key) {
+        setCached(cacheKey, detail, 30 * 60 * 1000);
+        return detail;
+      }
+    } catch {
+      // Eşdeğer takson çözümlenemezse yoksayılır
     }
-  } catch {
-    // Eşdeğer takson çözümlenemezse yoksayılır
+    return null;
+  });
+}
+
+interface EvidenceBasisEntry {
+  fossilTotal: number;
+  liveObs: number;
+  ok: boolean;
+}
+
+async function batchFetchEvidenceBasisCounts(
+  speciesKeys: number[]
+): Promise<Map<number, EvidenceBasisEntry>> {
+  const result = new Map<number, EvidenceBasisEntry>();
+  const uniqueKeys = Array.from(
+    new Set(speciesKeys.filter((k): k is number => Number.isInteger(k) && k > 0))
+  ).sort((a, b) => a - b);
+
+  if (uniqueKeys.length === 0) return result;
+
+  const missingKeys: number[] = [];
+  for (const k of uniqueKeys) {
+    const cached = getCached<EvidenceBasisEntry>(`evidence-basis:v1:${k}`);
+    if (cached && cached.ok) {
+      result.set(k, cached);
+    } else {
+      missingKeys.push(k);
+    }
   }
-  return null;
+
+  if (missingKeys.length === 0) return result;
+
+  const chunks: number[][] = [];
+  for (let i = 0; i < missingKeys.length; i += 40) {
+    chunks.push(missingKeys.slice(i, i + 40));
+  }
+
+  await runWithConcurrencyLimit(chunks, 2, async (chunkKeys) => {
+    const keyParams = chunkKeys.map(k => `speciesKey=${k}`).join('&');
+    const facetLimit = Math.max(50, chunkKeys.length + 15);
+    const fossilUrl = `https://api.gbif.org/v1/occurrence/search?${keyParams}&basisOfRecord=FOSSIL_SPECIMEN&limit=0&facet=speciesKey&facetLimit=${facetLimit}`;
+    const liveUrl = `https://api.gbif.org/v1/occurrence/search?${keyParams}&basisOfRecord=HUMAN_OBSERVATION&basisOfRecord=OBSERVATION&basisOfRecord=MACHINE_OBSERVATION&limit=0&facet=speciesKey&facetLimit=${facetLimit}`;
+
+    const [fossilParsed, liveParsed] = await Promise.all([
+      fetchSafeJson<any>(fossilUrl, 'GBIF Fossil Evidence Batch API', 1, 7500),
+      fetchSafeJson<any>(liveUrl, 'GBIF Live Evidence Batch API', 1, 7500),
+    ]);
+
+    const extractFacetMap = (parsed: SafeJsonParseResult<any>): { ok: boolean; map: Map<number, number> } => {
+      const map = new Map<number, number>();
+      if (!parsed.ok || !parsed.data || !Array.isArray(parsed.data.facets)) {
+        return { ok: false, map };
+      }
+      const spFacet = parsed.data.facets.find(
+        (f: any) => f && (f.field === 'speciesKey' || f.field === 'SPECIES_KEY')
+      );
+      if (!spFacet || !Array.isArray(spFacet.counts)) {
+        return { ok: false, map };
+      }
+      for (const rc of spFacet.counts) {
+        const k = Number(rc?.name);
+        const cnt = typeof rc?.count === 'number' ? rc.count : 0;
+        if (Number.isInteger(k) && k > 0) map.set(k, cnt);
+      }
+      return { ok: true, map };
+    };
+
+    const fossilFacet = extractFacetMap(fossilParsed);
+    const liveFacet = extractFacetMap(liveParsed);
+    const bothOk = fossilFacet.ok && liveFacet.ok;
+
+    for (const k of chunkKeys) {
+      const entry: EvidenceBasisEntry = {
+        fossilTotal: fossilFacet.map.get(k) ?? 0,
+        liveObs: liveFacet.map.get(k) ?? 0,
+        ok: bothOk,
+      };
+      result.set(k, entry);
+      if (bothOk) {
+        setCached(`evidence-basis:v1:${k}`, entry, 30 * 60 * 1000);
+      }
+    }
+  });
+
+  return result;
 }
 
 async function evaluateSpeciesEvidence(
   resolvedSp: any,
-  localSciEntry: CommonSpeciesEntry | undefined
+  localSciEntry: CommonSpeciesEntry | undefined,
+  preloadedBasis?: EvidenceBasisEntry
 ): Promise<SpeciesEvidenceSummary> {
   const key = Number(resolvedSp.key);
-  const evidenceCacheKey = `gbif-species-evidence:v4:${key}`;
+  const evidenceCacheKey = `gbif-species-evidence:v5:${key}`;
   const cached = getCached<SpeciesEvidenceSummary>(evidenceCacheKey);
   if (cached) return cached;
 
@@ -5055,59 +6211,97 @@ async function evaluateSpeciesEvidence(
       String(resolvedSp.constituentKey || '')
     );
     const inlineVern = extractVernacularsFromSearchItem(resolvedSp);
-    const needsVernacularRequest = !localSciEntry && !inlineVern.trName && !inlineVern.enName;
+    const gbifInlineTr = inlineVern.trName;
+    const gbifInlineEn = inlineVern.enName;
+    const hasInlineVernacular = Boolean(localSciEntry || gbifInlineTr || gbifInlineEn);
 
-    const [profilesRes, basisRes, vernRes] = await Promise.allSettled([
-      fetchWithRetry(`https://api.gbif.org/v1/species/${key}/speciesProfiles`, undefined, 1, 6000).then(async r => ({
-        ok: r.ok,
-        data: r.ok ? await r.json() : { results: [] },
-      })),
-      fetchWithRetry(
-        `https://api.gbif.org/v1/occurrence/search?speciesKey=${key}&limit=0&facet=basisOfRecord`,
-        undefined,
-        1,
-        6000
-      ).then(async r => ({
-        ok: r.ok,
-        data: r.ok ? await r.json() : { facets: [] },
-      })),
+    // Hızlı Yol 1: GBIF Backbone doğrudan soyu tükenmiş (extinct=true) olarak işaretlemişse ek API çağrısı yapma
+    if (resolvedSp.extinct === true) {
+      const extinctSummary: SpeciesEvidenceSummary = {
+        existenceStatus: 'FOSSIL_OR_EXTINCT',
+        existenceEvidence: 'GBIF Backbone üzerinde soyu tükenmiş (extinct=true) olarak işaretli',
+        isFossilOnly: true,
+        gbifTurkishName: gbifInlineTr,
+        gbifEnglishName: gbifInlineEn,
+        hasVernacularName: hasInlineVernacular,
+        isAuthoritativeLivingChecklist,
+        hasLivingProfile: false,
+      };
+      setCached(evidenceCacheKey, extinctSummary, 30 * 60 * 1000);
+      return extinctSummary;
+    }
+
+    // Hızlı Yol 2: GBIF Backbone yaşayan tür (extinct=false) olarak doğrulamışsa per-species profil/gözlem isteği atma
+    if (resolvedSp.extinct === false) {
+      const reasons: string[] = ['GBIF extinct=false yaşam kaydı'];
+      if (localSciEntry) reasons.push('doğrulanmış tür envanteri');
+      if (hasInlineVernacular) reasons.push('yaygın ad doğrulaması');
+      if (isAuthoritativeLivingChecklist) reasons.push('Catalogue of Life / Clements');
+
+      const livingSummary: SpeciesEvidenceSummary = {
+        existenceStatus: 'LIVING',
+        existenceEvidence: `Yaşayan tür (${reasons.join(', ')})`,
+        isFossilOnly: false,
+        gbifTurkishName: gbifInlineTr,
+        gbifEnglishName: gbifInlineEn,
+        hasVernacularName: hasInlineVernacular,
+        isAuthoritativeLivingChecklist,
+        hasLivingProfile: true,
+      };
+      setCached(evidenceCacheKey, livingSummary, 30 * 60 * 1000);
+      return livingSummary;
+    }
+
+    // extinct === undefined ise toplu (batch) gözlem kanıtını kullan; yalnızca belirsiz/sınır vakalarda speciesProfiles / vernacularNames sor
+    let basisEntry = preloadedBasis;
+    if (!basisEntry) {
+      const singleBatch = await batchFetchEvidenceBasisCounts([key]);
+      basisEntry = singleBatch.get(key) ?? { fossilTotal: 0, liveObs: 0, ok: false };
+    }
+
+    const fossilTotal = basisEntry.fossilTotal;
+    const liveObs = basisEntry.liveObs;
+    const basisOk = basisEntry.ok;
+
+    const needsProfileCheck = liveObs < 3 || fossilTotal > 0;
+    const needsVernacularRequest =
+      !hasInlineVernacular &&
+      liveObs >= 1 &&
+      liveObs < 3 &&
+      fossilTotal === 0 &&
+      !isAuthoritativeLivingChecklist;
+
+    const [profilesRes, vernRes] = await Promise.allSettled([
+      needsProfileCheck
+        ? fetchSafeJson<{ results?: any[] }>(`https://api.gbif.org/v1/species/${key}/speciesProfiles`, 'GBIF SpeciesProfiles API', 1, 6000)
+        : Promise.resolve<SafeJsonParseResult<{ results?: any[] }>>({ ok: true, status: 200, data: { results: [] } }),
       needsVernacularRequest
-        ? fetchWithRetry(`https://api.gbif.org/v1/species/${key}/vernacularNames?limit=30`, undefined, 1, 6000).then(
-            async r => ({
-              ok: r.ok,
-              data: r.ok ? await r.json() : { results: [] },
-            })
-          )
-        : Promise.resolve({ ok: true, data: { results: [] } }),
+        ? fetchSafeJson<{ results?: any[] }>(`https://api.gbif.org/v1/species/${key}/vernacularNames?limit=30`, 'GBIF VernacularNames API', 1, 6000)
+        : Promise.resolve<SafeJsonParseResult<{ results?: any[] }>>({ ok: true, status: 200, data: { results: [] } }),
     ]);
 
-    const profilesOk = profilesRes.status === 'fulfilled' && profilesRes.value.ok;
-    const basisOk = basisRes.status === 'fulfilled' && basisRes.value.ok;
-
+    const profilesOk = !needsProfileCheck || (profilesRes.status === 'fulfilled' && profilesRes.value.ok);
     const profiles: any[] =
-      profilesOk && Array.isArray(profilesRes.value.data?.results)
+      profilesRes.status === 'fulfilled' && profilesRes.value.ok && Array.isArray(profilesRes.value.data?.results)
         ? profilesRes.value.data.results
         : [];
-    const bCounts: Array<{ name: string; count: number }> =
-      basisOk ? basisRes.value.data?.facets?.[0]?.counts || [] : [];
     const vernResults: any[] =
       vernRes.status === 'fulfilled' && vernRes.value.ok && Array.isArray(vernRes.value.data?.results)
         ? vernRes.value.data.results
         : [];
 
     const gbifTurkishName =
-      inlineVern.trName ||
+      gbifInlineTr ||
       vernResults.find(x => x?.language === 'tur' && x?.preferred)?.vernacularName ||
       vernResults.find(x => x?.language === 'tur')?.vernacularName ||
       undefined;
     const gbifEnglishName =
-      inlineVern.enName ||
+      gbifInlineEn ||
       vernResults.find(x => x?.language === 'eng' && x?.preferred)?.vernacularName ||
       vernResults.find(x => x?.language === 'eng')?.vernacularName ||
       undefined;
     const hasVernacularName = Boolean(localSciEntry || gbifTurkishName || gbifEnglishName);
 
-    const hasBackboneLivingFlag = resolvedSp.extinct === false;
     const hasLivingProfile = profiles.some(p => p?.extinct === false);
     const hasExtinctProfile = profiles.some(p => p?.extinct === true);
     const pbdbGeologicalProfile = profiles.find(
@@ -5116,12 +6310,6 @@ async function evaluateSpeciesEvidence(
         (typeof p?.livingPeriod === 'string' && GEOLOGICAL_PERIOD_PATTERN.test(p.livingPeriod) && p?.extinct !== false)
     );
 
-    const fossilTotal = bCounts.find(x => x.name === 'FOSSIL_SPECIMEN')?.count || 0;
-    const humanObs = bCounts.find(x => x.name === 'HUMAN_OBSERVATION')?.count || 0;
-    const machineObs = bCounts.find(x => x.name === 'MACHINE_OBSERVATION')?.count || 0;
-    const genericObs = bCounts.find(x => x.name === 'OBSERVATION')?.count || 0;
-    const livingSpecimens = bCounts.find(x => x.name === 'LIVING_SPECIMEN')?.count || 0;
-    const liveObs = humanObs + machineObs + genericObs;
     const hasLivingLocalInventory = Boolean(
       localSciEntry && !['EX', 'EW'].includes((localSciEntry.iucn || '').toUpperCase())
     );
@@ -5130,36 +6318,33 @@ async function evaluateSpeciesEvidence(
     let existenceEvidence: string;
     let isFossilOnly = false;
 
-    if (resolvedSp.extinct === true || hasExtinctProfile) {
+    if (hasExtinctProfile) {
       existenceStatus = 'FOSSIL_OR_EXTINCT';
       isFossilOnly = true;
       existenceEvidence = pbdbGeologicalProfile?.livingPeriod
         ? `GBIF speciesProfiles soyu tükenmiş / fosil kaydı (${pbdbGeologicalProfile.livingPeriod})`
-        : 'GBIF Backbone / speciesProfiles üzerinde soyu tükenmiş (extinct=true) olarak işaretli';
-    } else if (pbdbGeologicalProfile && !hasLivingProfile && !hasBackboneLivingFlag) {
+        : 'GBIF speciesProfiles üzerinde soyu tükenmiş (extinct=true) olarak işaretli';
+    } else if (pbdbGeologicalProfile && !hasLivingProfile) {
       existenceStatus = 'FOSSIL_OR_EXTINCT';
       isFossilOnly = true;
       existenceEvidence = `Paleobiology Database jeolojik dönem kaydı (${pbdbGeologicalProfile.livingPeriod || 'fosil takson'})`;
-    } else if (fossilTotal >= 5 && fossilTotal >= liveObs * 3 && !hasLivingProfile && !hasBackboneLivingFlag) {
+    } else if (fossilTotal >= 5 && fossilTotal >= liveObs * 3 && !hasLivingProfile) {
       existenceStatus = 'FOSSIL_OR_EXTINCT';
       isFossilOnly = true;
       existenceEvidence = `Fosil kayıtları baskın (${fossilTotal} FOSSIL_SPECIMEN, ${liveObs} canlı gözlem; yaşayan tür profili yok)`;
     } else if (
-      hasBackboneLivingFlag ||
       hasLivingProfile ||
-      (livingSpecimens >= 1 && fossilTotal === 0) ||
       (hasLivingLocalInventory && fossilTotal === 0) ||
       (liveObs >= 3 && fossilTotal === 0) ||
       (liveObs >= 1 && (hasVernacularName || isAuthoritativeLivingChecklist) && fossilTotal === 0)
     ) {
       existenceStatus = 'LIVING';
       const reasons: string[] = [];
-      if (hasBackboneLivingFlag || hasLivingProfile) reasons.push('GBIF extinct=false yaşam kaydı');
-      if (livingSpecimens > 0) reasons.push(`${livingSpecimens.toLocaleString('tr-TR')} canlı örnek (LIVING_SPECIMEN)`);
+      if (hasLivingProfile) reasons.push('GBIF extinct=false yaşam kaydı');
       if (liveObs > 0) reasons.push(`${liveObs.toLocaleString('tr-TR')} canlı gözlem`);
       if (hasLivingLocalInventory) reasons.push('doğrulanmış tür envanteri');
       if (hasVernacularName) reasons.push('yaygın ad doğrulaması');
-      if (isAuthoritativeLivingChecklist && (hasBackboneLivingFlag || hasLivingProfile || liveObs > 0)) {
+      if (isAuthoritativeLivingChecklist && (hasLivingProfile || liveObs > 0)) {
         reasons.push('Catalogue of Life / Clements');
       }
       existenceEvidence = `Yaşayan tür (${reasons.join(', ')})`;
@@ -5181,7 +6366,7 @@ async function evaluateSpeciesEvidence(
       gbifEnglishName,
       hasVernacularName,
       isAuthoritativeLivingChecklist,
-      hasLivingProfile: hasLivingProfile || hasBackboneLivingFlag,
+      hasLivingProfile,
     };
     if (profilesOk && basisOk) {
       setCached(evidenceCacheKey, summary, 30 * 60 * 1000);
@@ -5194,32 +6379,31 @@ async function fetchExcludedSubspeciesCount(
   taxonKeys: number[],
   countryParam: string,
   nonFossilBasisParam: string
-): Promise<number> {
-  if (!taxonKeys || taxonKeys.length === 0) return 0;
-  const cacheKey = `discover-excl-sub:v1:${taxonKeys.join(',')}:${countryParam}:${nonFossilBasisParam ? 1 : 0}`;
-  const cached = getCached<number>(cacheKey);
+): Promise<{ status: OccurrenceCountStatus; count: number }> {
+  if (!taxonKeys || taxonKeys.length === 0) return { status: 'OK', count: 0 };
+  const cacheKey = `discover-excl-sub:v2:${taxonKeys.join(',')}:${countryParam}:${nonFossilBasisParam ? 1 : 0}`;
+  const cached = getCached<{ status: OccurrenceCountStatus; count: number }>(cacheKey);
   if (cached !== null) return cached;
 
-  let totalExcluded = 0;
-  const primarySubKey = taxonKeys[0];
-  try {
-    const res = await fetchWithRetry(
-      `https://api.gbif.org/v1/occurrence/search?taxonKey=${primarySubKey}${countryParam}${nonFossilBasisParam}&limit=0`,
-      undefined,
-      1,
-      6000
-    );
-    if (res.ok) {
-      const json = await res.json();
-      if (typeof json?.count === 'number') {
-        totalExcluded = json.count;
+  return runDedupedInFlight(`in-flight:${cacheKey}`, async () => {
+    const primarySubKey = taxonKeys[0];
+    try {
+      const parsed = await fetchSafeJson<{ count?: number }>(
+        `https://api.gbif.org/v1/occurrence/search?taxonKey=${primarySubKey}${countryParam}${nonFossilBasisParam}&limit=0`,
+        'GBIF Excluded Subspecies Count API',
+        1,
+        6000
+      );
+      if (parsed.ok && typeof parsed.data?.count === 'number' && Number.isFinite(parsed.data.count) && parsed.data.count >= 0) {
+        const okRes: { status: OccurrenceCountStatus; count: number } = { status: 'OK', count: parsed.data.count };
+        setCached(cacheKey, okRes, 15 * 60 * 1000);
+        return okRes;
       }
+    } catch {
+      // ignore, return ERROR below without caching
     }
-  } catch {
-    totalExcluded = 0;
-  }
-  setCached(cacheKey, totalExcluded, 15 * 60 * 1000);
-  return totalExcluded;
+    return { status: 'ERROR', count: 0 };
+  });
 }
 
 function evaluateBiologicalMembership(
@@ -5334,7 +6518,7 @@ export async function fetchBatchOccurrenceCounts(
   let errorReason: string | undefined;
 
   await runWithConcurrencyLimit(chunks, 2, async (chunkKeys) => {
-    const chunkCacheKey = `occ-batch:v2:${chunkKeys.join(',')}:${countryCode || 'GLOBAL'}:${nonFossilBasisParam ? 1 : 0}`;
+    const chunkCacheKey = `occ-batch:v3:${chunkKeys.join(',')}:${countryCode || 'GLOBAL'}:${nonFossilBasisParam ? 1 : 0}`;
     const cachedChunk = getCached<Array<[number, number]>>(chunkCacheKey);
     if (cachedChunk) {
       const cachedMap = new Map(cachedChunk);
@@ -5345,41 +6529,69 @@ export async function fetchBatchOccurrenceCounts(
       return;
     }
 
-    const keyParams = chunkKeys.map(k => `speciesKey=${k}`).join('&');
-    const facetLimit = Math.max(50, chunkKeys.length + 15);
-    const url = `https://api.gbif.org/v1/occurrence/search?${keyParams}${countryParam}${nonFossilBasisParam}&limit=0&facet=speciesKey&facetLimit=${facetLimit}`;
+    const chunkOutcome = await runDedupedInFlight(`in-flight:${chunkCacheKey}`, async () => {
+      const keyParams = chunkKeys.map(k => `speciesKey=${k}`).join('&');
+      const facetLimit = Math.max(50, chunkKeys.length + 15);
+      const url = `https://api.gbif.org/v1/occurrence/search?${keyParams}${countryParam}${nonFossilBasisParam}&limit=0&facet=speciesKey&facetLimit=${facetLimit}`;
 
-    try {
-      const res = await fetchWithRetry(url, undefined, 2, 8000);
-      if (!res.ok) {
-        hasErrors = true;
-        errorReason = `GBIF occurrence API HTTP ${res.status}`;
-        for (const k of chunkKeys) {
-          keyStatuses.set(k, 'ERROR');
+      try {
+        const parsed = await fetchSafeJson<Record<string, any>>(url, 'GBIF occurrence API', 2, 8000);
+        if (!parsed.ok || !parsed.data) {
+          return { ok: false as const, reason: parsed.errorMessage || `GBIF occurrence API HTTP ${parsed.status}` };
         }
-        return;
-      }
-      const json = await res.json();
-      const rawCounts: Array<{ name: string; count: number }> =
-        json?.facets?.find((f: { field: string }) => f.field === 'speciesKey' || f.field === 'SPECIES_KEY')?.counts || [];
-      const chunkMap = new Map<number, number>();
-      for (const rc of rawCounts) {
-        const k = Number(rc.name);
-        const c = Number(rc.count || 0);
-        if (Number.isInteger(k) && k > 0) {
-          chunkMap.set(k, c);
+        const json = parsed.data;
+        if (!json || typeof json !== 'object' || Array.isArray(json) || !Array.isArray(json.facets)) {
+          return { ok: false as const, reason: 'GBIF occurrence yanıtında beklenen facets alanı bulunamadı' };
         }
+
+        const speciesFacet = json.facets.find(
+          (f: any) => f && typeof f === 'object' && (f.field === 'speciesKey' || f.field === 'SPECIES_KEY')
+        );
+        if (!speciesFacet || !Array.isArray(speciesFacet.counts)) {
+          return { ok: false as const, reason: 'GBIF occurrence yanıtında speciesKey facet verisi eksik veya geçersiz' };
+        }
+
+        if (typeof json.count === 'number' && json.count > 0 && speciesFacet.counts.length === 0) {
+          return { ok: false as const, reason: 'GBIF occurrence toplam sayısı pozitif ancak speciesKey facet dökümü boş döndü' };
+        }
+
+        const chunkMap = new Map<number, number>();
+        for (const rc of speciesFacet.counts) {
+          if (
+            !rc ||
+            typeof rc !== 'object' ||
+            rc.name === undefined ||
+            rc.name === null ||
+            typeof rc.count !== 'number' ||
+            !Number.isFinite(rc.count) ||
+            rc.count < 0
+          ) {
+            return { ok: false as const, reason: 'GBIF speciesKey facet öğeleri beklenen biçimde değil' };
+          }
+          const k = Number(rc.name);
+          if (!Number.isInteger(k) || k <= 0) {
+            return { ok: false as const, reason: 'GBIF speciesKey facet öğeleri beklenen biçimde değil' };
+          }
+          chunkMap.set(k, rc.count);
+        }
+
+        setCached(chunkCacheKey, Array.from(chunkMap.entries()), 15 * 60 * 1000);
+        return { ok: true as const, chunkMap };
+      } catch (err: any) {
+        return { ok: false as const, reason: err?.message || 'GBIF occurrence servisine bağlanılamadı' };
       }
-      for (const k of chunkKeys) {
-        counts.set(k, chunkMap.get(k) ?? 0);
-        keyStatuses.set(k, 'OK');
-      }
-      setCached(chunkCacheKey, Array.from(chunkMap.entries()), 15 * 60 * 1000);
-    } catch (err: any) {
+    });
+
+    if (!chunkOutcome.ok) {
       hasErrors = true;
-      errorReason = err?.message || 'GBIF occurrence servisine bağlanılamadı';
+      errorReason = chunkOutcome.reason;
       for (const k of chunkKeys) {
         keyStatuses.set(k, 'ERROR');
+      }
+    } else {
+      for (const k of chunkKeys) {
+        counts.set(k, chunkOutcome.chunkMap.get(k) ?? 0);
+        keyStatuses.set(k, 'OK');
       }
     }
   });
@@ -5387,34 +6599,62 @@ export async function fetchBatchOccurrenceCounts(
   return { counts, keyStatuses, hasErrors, errorReason };
 }
 
-async function fetchScopeTotalOccurrences(
+export interface ScopeOccurrenceResult {
+  status: OccurrenceCountStatus;
+  count: number | null;
+  errorMessage?: string;
+}
+
+export async function fetchScopeTotalOccurrences(
   taxonKeys: number[],
   countryCode: string,
   nonFossilBasisParam: string
-): Promise<number> {
-  if (taxonKeys.length === 0) return 0;
-  const cacheKey = `scope-total-occ:v1:${taxonKeys.join(',')}:${countryCode || 'GLOBAL'}:${nonFossilBasisParam ? 1 : 0}`;
-  const cached = getCached<number>(cacheKey);
+): Promise<ScopeOccurrenceResult> {
+  if (taxonKeys.length === 0) {
+    return {
+      status: 'ERROR',
+      count: null,
+      errorMessage: 'Kapsam gözlem sayısı için geçerli takson anahtarı bulunamadı.',
+    };
+  }
+  const cacheKey = `scope-total-occ:v2:${taxonKeys.join(',')}:${countryCode || 'GLOBAL'}:${nonFossilBasisParam ? 1 : 0}`;
+  const cached = getCached<ScopeOccurrenceResult>(cacheKey);
   if (cached !== null) return cached;
 
-  const taxonQueryParams = taxonKeys.map(k => `taxonKey=${k}`).join('&');
-  const countryParam = countryCode ? `&country=${encodeURIComponent(countryCode)}` : '';
-  const url = `https://api.gbif.org/v1/occurrence/search?${taxonQueryParams}${countryParam}${nonFossilBasisParam}&limit=0`;
+  return runDedupedInFlight(`in-flight:${cacheKey}`, async () => {
+    const taxonQueryParams = taxonKeys.map(k => `taxonKey=${k}`).join('&');
+    const countryParam = countryCode ? `&country=${encodeURIComponent(countryCode)}` : '';
+    const url = `https://api.gbif.org/v1/occurrence/search?${taxonQueryParams}${countryParam}${nonFossilBasisParam}&limit=0`;
 
-  let total = 0;
-  try {
-    const res = await fetchWithRetry(url, undefined, 2, 7000);
-    if (res.ok) {
-      const json = await res.json();
-      if (typeof json?.count === 'number') {
-        total = json.count;
-        setCached(cacheKey, total, 15 * 60 * 1000);
+    try {
+      const parsed = await fetchSafeJson<{ count?: number }>(url, 'GBIF Scope Occurrence Count API', 2, 7000);
+      if (
+        parsed.ok &&
+        parsed.data &&
+        typeof parsed.data.count === 'number' &&
+        Number.isFinite(parsed.data.count) &&
+        parsed.data.count >= 0
+      ) {
+        const result: ScopeOccurrenceResult = {
+          status: 'OK',
+          count: parsed.data.count,
+        };
+        setCached(cacheKey, result, 15 * 60 * 1000);
+        return result;
       }
+      return {
+        status: 'ERROR',
+        count: null,
+        errorMessage: parsed.errorMessage || 'GBIF kapsam gözlem sayısı servisi geçersiz veya eksik count alanı döndürdü.',
+      };
+    } catch (err: any) {
+      return {
+        status: 'ERROR',
+        count: null,
+        errorMessage: err?.message || 'GBIF kapsam gözlem sayısı servisine bağlanılamadı.',
+      };
     }
-  } catch {
-    total = 0;
-  }
-  return total;
+  });
 }
 
 /**
@@ -5484,7 +6724,9 @@ export async function discoverSpeciesByGroup(
       countryName,
       groups,
       species: [],
-      totalOccurrencesInScope: 0,
+      totalOccurrencesInScope: null,
+      totalOccurrencesStatus: 'ERROR',
+      totalOccurrencesError: 'Doğrulanmış bir taksonomik grup bulunamadığı için kapsam gözlem sayısı sorgulanamadı.',
       pagination: {
         page,
         pageSize,
@@ -5509,145 +6751,200 @@ export async function discoverSpeciesByGroup(
     )
   ).sort((a, b) => a - b);
 
-  const discoveryCacheKey = `discover-bb:v1:${activeTaxonKeys.join(',')}:${activeGroup.id}:${countryCode || 'GLOBAL'}:p${page}:s${pageSize}:f${includeFossilOnly ? 1 : 0}:u${includeUncertainTaxa ? 1 : 0}:i${enrichWithInaturalist ? 1 : 0}`;
+  const discoveryCacheKey = `discover-bb:v2:${activeTaxonKeys.join(',')}:${activeGroup.id}:${countryCode || 'GLOBAL'}:p${page}:s${pageSize}:f${includeFossilOnly ? 1 : 0}:u${includeUncertainTaxa ? 1 : 0}:i${enrichWithInaturalist ? 1 : 0}`;
   const cachedResult = getCached<SpeciesDiscoveryResult>(discoveryCacheKey);
   if (cachedResult) return cachedResult;
 
-  const excludedSciSet = new Set(
-    (activeGroup.excludedScientificNames || []).map(n => n.toLowerCase())
-  );
-  const excludedTaxonomySet = new Set(
-    (activeGroup.excludedOrderNames || []).map(n => n.toLowerCase())
-  );
-
-  // ÜLKEDEN VE GÖZLEM SAYILARINDAN TAMAMEN BAĞIMSIZ GBIF BACKBONE KATALOG HAVUZU
-  const backbonePoolCacheKey = `discover-bb-pool:v2:${activeTaxonKeys.join(',')}:${activeGroup.id}:f${includeFossilOnly ? 1 : 0}:u${includeUncertainTaxa ? 1 : 0}`;
-  let pool = getCached<BackboneCatalogPoolState>(backbonePoolCacheKey);
-  if (!pool) {
-    pool = {
-      taxonCursors: activeTaxonKeys.map(htKey => ({
-        htKey,
-        nextOffset: 0,
-        endOfRecords: false,
-        apiTotalCount: null,
-        hitOffsetLimit: false,
-        consecutiveFailures: 0,
-      })),
-      cursorRoundRobinIndex: 0,
-      rawCandidates: [],
-      rawSeenKeys: new Set<number>(),
-      nextRawCandidateIndex: 0,
-      allowedResolved: false,
-      verifiedItems: [],
-      seenAcceptedKeys: new Set<number>(),
-      seenCanonicalNames: new Set<string>(),
-      uncertainOrHistoricalCount: 0,
-      filteredFossilCount: 0,
-      filteredOutOfGroupCount: 0,
-      hitOffsetLimit: false,
-    };
-  }
-
-  const targetStartIdx = (page - 1) * pageSize;
-  const targetEndIdx = targetStartIdx + pageSize;
-
-  const processCandidateRecords = async (records: any[]): Promise<DiscoveredSpeciesItem[]> => {
-    const batchSettled = await runWithConcurrencyLimit(
-      records,
-      DISCOVERY_CONCURRENCY_LIMIT,
-      async (rawCandidate) => {
-        if (!rawCandidate) return null;
-
-        // 1. Ön eleme (ek ağ çağrısı yapmadan hızlı Backbone filtrelemesi)
-        if (!includeFossilOnly && rawCandidate.extinct === true) {
-          return { earlyFiltered: 'FOSSIL' as const };
-        }
-
-        let resolvedSp = rawCandidate;
-        let synonymOf: string | undefined = rawCandidate._synonymOf;
-
-        if (resolvedSp.taxonomicStatus === 'SYNONYM' && resolvedSp.acceptedKey) {
-          synonymOf = synonymOf || resolvedSp.canonicalName || resolvedSp.scientificName;
-          const accSp = await fetchSpeciesDetailCached(Number(resolvedSp.acceptedKey));
-          if (accSp?.key) resolvedSp = accSp;
-        }
-
-        if (resolvedSp.rank && String(resolvedSp.rank).toUpperCase() !== 'SPECIES' && resolvedSp.speciesKey && resolvedSp.speciesKey !== resolvedSp.key) {
-          const parentSp = await fetchSpeciesDetailCached(Number(resolvedSp.speciesKey));
-          if (parentSp?.key) resolvedSp = parentSp;
-        }
-
-        if (!resolvedSp?.key) return null;
-        if (String(resolvedSp.kingdom || '').toLowerCase() !== 'animalia') return null;
-        if (String(resolvedSp.rank || '').toUpperCase() !== 'SPECIES') return null;
-        if (resolvedSp.taxonomicStatus && resolvedSp.taxonomicStatus !== 'ACCEPTED') return null;
-
-        let canonical = String(resolvedSp.canonicalName || resolvedSp.scientificName || '').trim();
-        let canonicalLower = canonical.toLowerCase();
-
-        const mergedTarget = activeGroup.mergedEquivalents?.[canonicalLower];
-        if (mergedTarget && mergedTarget.toLowerCase() !== canonicalLower) {
-          const targetSp = await resolveCanonicalSpeciesTarget(mergedTarget);
-          if (targetSp?.key) {
-            synonymOf = synonymOf || `${canonical} (örtüşen taksonomik kompleks)`;
-            resolvedSp = targetSp;
-            canonical = String(resolvedSp.canonicalName || resolvedSp.scientificName || mergedTarget).trim();
-            canonicalLower = canonical.toLowerCase();
-          }
-        }
-
-        const canonicalWords = canonical.split(/\s+/).filter(Boolean);
-        if (!canonical || canonicalWords.length < 2 || /\b(spec|sp|spp)\.?$/i.test(canonical)) {
-          return null;
-        }
-
-        // Hızlı grup dışı / evcil kontrolü
-        const genusLower = String(resolvedSp.genus || canonicalLower.split(' ')[0] || '').toLowerCase();
-        const orderLower = String(resolvedSp.order || '').toLowerCase();
-        const familyLower = String(resolvedSp.family || '').toLowerCase();
-        const classLower = String(resolvedSp.class || '').toLowerCase();
-        if (
-          excludedSciSet.has(canonicalLower) ||
-          (orderLower && excludedTaxonomySet.has(orderLower)) ||
-          (familyLower && excludedTaxonomySet.has(familyLower)) ||
-          (genusLower && excludedTaxonomySet.has(genusLower)) ||
-          (classLower && excludedTaxonomySet.has(classLower)) ||
-          (DOMESTIC_CANONICAL_NAMES.has(canonicalLower) && activeGroup.allowDomestic === false)
-        ) {
-          return { earlyFiltered: 'EXCLUDED' as const };
-        }
-
-        const localSciEntry = BILINGUAL_SPECIES_ENTRIES.find(
-          e => e.entry.scientificName.toLowerCase() === canonicalLower
-        )?.entry;
-
-        const evidence = await evaluateSpeciesEvidence(resolvedSp, localSciEntry);
-        const membership = evaluateBiologicalMembership(
-          resolvedSp,
-          canonicalLower,
-          activeGroup,
-          evidence,
-          excludedSciSet,
-          excludedTaxonomySet
-        );
-
-        return {
-          resolvedSp,
-          canonical,
-          canonicalLower,
-          synonymOf,
-          localSciEntry,
-          evidence,
-          membership,
-        };
-      }
+  return runDedupedInFlight(`in-flight:${discoveryCacheKey}`, async () => {
+    const excludedSciSet = new Set(
+      (activeGroup.excludedScientificNames || []).map(n => n.toLowerCase())
     );
+    const excludedTaxonomySet = new Set(
+      (activeGroup.excludedOrderNames || []).map(n => n.toLowerCase())
+    );
+
+    // ÜLKEDEN VE GÖZLEM SAYILARINDAN TAMAMEN BAĞIMSIZ GBIF BACKBONE KATALOG HAVUZU
+    const backbonePoolCacheKey = `discover-bb-pool:v3:${activeTaxonKeys.join(',')}:${activeGroup.id}:f${includeFossilOnly ? 1 : 0}:u${includeUncertainTaxa ? 1 : 0}`;
+    const cachedPool = getCached<BackboneCatalogPoolState>(backbonePoolCacheKey);
+    let pool: BackboneCatalogPoolState = cachedPool
+      ? {
+          ...cachedPool,
+          taxonCursors: cachedPool.taxonCursors.map(c => ({ ...c })),
+          rawCandidates: [...cachedPool.rawCandidates],
+          rawSeenKeys: new Set(cachedPool.rawSeenKeys),
+          verifiedItems: [...cachedPool.verifiedItems],
+          seenAcceptedKeys: new Set(cachedPool.seenAcceptedKeys),
+          seenCanonicalNames: new Set(cachedPool.seenCanonicalNames),
+        }
+      : {
+          taxonCursors: activeTaxonKeys.map(htKey => ({
+            htKey,
+            nextOffset: 0,
+            endOfRecords: false,
+            apiTotalCount: null,
+            hitOffsetLimit: false,
+            consecutiveFailures: 0,
+          })),
+          cursorRoundRobinIndex: 0,
+          rawCandidates: [],
+          rawSeenKeys: new Set<number>(),
+          nextRawCandidateIndex: 0,
+          allowedResolved: false,
+          verifiedItems: [],
+          seenAcceptedKeys: new Set<number>(),
+          seenCanonicalNames: new Set<string>(),
+          uncertainOrHistoricalCount: 0,
+          filteredFossilCount: 0,
+          filteredOutOfGroupCount: 0,
+          hitOffsetLimit: false,
+          serverErrorReached: false,
+          catalogErrorMessage: undefined,
+        };
+
+    const targetStartIdx = (page - 1) * pageSize;
+    const targetEndIdx = targetStartIdx + pageSize;
+
+    const processCandidateRecords = async (records: any[]): Promise<DiscoveredSpeciesItem[]> => {
+      // Adım 1: Sinonim / alt-tür çözümlerini ve erken grup filtrelemesini yap
+      const preparedSettled = await runWithConcurrencyLimit(
+        records,
+        DISCOVERY_CONCURRENCY_LIMIT,
+        async (rawCandidate) => {
+          if (!rawCandidate) return null;
+
+          if (!includeFossilOnly && rawCandidate.extinct === true) {
+            return { kind: 'EARLY' as const, earlyFiltered: 'FOSSIL' as const };
+          }
+
+          let resolvedSp = rawCandidate;
+          let synonymOf: string | undefined = rawCandidate._synonymOf;
+
+          if (resolvedSp.taxonomicStatus === 'SYNONYM' && resolvedSp.acceptedKey) {
+            synonymOf = synonymOf || resolvedSp.canonicalName || resolvedSp.scientificName;
+            const accSp = await fetchSpeciesDetailCached(Number(resolvedSp.acceptedKey));
+            if (accSp?.key) resolvedSp = accSp;
+          }
+
+          if (resolvedSp.rank && String(resolvedSp.rank).toUpperCase() !== 'SPECIES' && resolvedSp.speciesKey && resolvedSp.speciesKey !== resolvedSp.key) {
+            const parentSp = await fetchSpeciesDetailCached(Number(resolvedSp.speciesKey));
+            if (parentSp?.key) resolvedSp = parentSp;
+          }
+
+          if (!resolvedSp?.key) return null;
+          if (String(resolvedSp.kingdom || '').toLowerCase() !== 'animalia') return null;
+          if (String(resolvedSp.rank || '').toUpperCase() !== 'SPECIES') return null;
+          if (resolvedSp.taxonomicStatus && resolvedSp.taxonomicStatus !== 'ACCEPTED') return null;
+
+          let canonical = String(resolvedSp.canonicalName || resolvedSp.scientificName || '').trim();
+          let canonicalLower = canonical.toLowerCase();
+
+          const mergedTarget = activeGroup.mergedEquivalents?.[canonicalLower];
+          if (mergedTarget && mergedTarget.toLowerCase() !== canonicalLower) {
+            const targetSp = await resolveCanonicalSpeciesTarget(mergedTarget);
+            if (targetSp?.key) {
+              synonymOf = synonymOf || `${canonical} (örtüşen taksonomik kompleks)`;
+              resolvedSp = targetSp;
+              canonical = String(resolvedSp.canonicalName || resolvedSp.scientificName || mergedTarget).trim();
+              canonicalLower = canonical.toLowerCase();
+            }
+          }
+
+          const canonicalWords = canonical.split(/\s+/).filter(Boolean);
+          if (!canonical || canonicalWords.length < 2 || /\b(spec|sp|spp)\.?$/i.test(canonical)) {
+            return null;
+          }
+
+          const genusLower = String(resolvedSp.genus || canonicalLower.split(' ')[0] || '').toLowerCase();
+          const orderLower = String(resolvedSp.order || '').toLowerCase();
+          const familyLower = String(resolvedSp.family || '').toLowerCase();
+          const classLower = String(resolvedSp.class || '').toLowerCase();
+          if (
+            excludedSciSet.has(canonicalLower) ||
+            (orderLower && excludedTaxonomySet.has(orderLower)) ||
+            (familyLower && excludedTaxonomySet.has(familyLower)) ||
+            (genusLower && excludedTaxonomySet.has(genusLower)) ||
+            (classLower && excludedTaxonomySet.has(classLower)) ||
+            (DOMESTIC_CANONICAL_NAMES.has(canonicalLower) && activeGroup.allowDomestic === false)
+          ) {
+            return { kind: 'EARLY' as const, earlyFiltered: 'EXCLUDED' as const };
+          }
+
+          const localSciEntry = BILINGUAL_SPECIES_ENTRIES.find(
+            e => e.entry.scientificName.toLowerCase() === canonicalLower
+          )?.entry;
+
+          return {
+            kind: 'CANDIDATE' as const,
+            resolvedSp,
+            canonical,
+            canonicalLower,
+            synonymOf,
+            localSciEntry,
+          };
+        }
+      );
+
+      // Adım 2: Yalnızca extinct alanı undefined olan türler için kanıt gözlemlerini TEK/İKİ toplu batch sorguda çek
+      const unresolvedExtinctKeys: number[] = [];
+      for (const p of preparedSettled) {
+        if (p.status !== 'fulfilled' || !p.value || p.value.kind !== 'CANDIDATE') continue;
+        const sp = p.value.resolvedSp;
+        const spKey = Number(sp.key);
+        if (
+          sp.extinct === undefined &&
+          !getCached<SpeciesEvidenceSummary>(`gbif-species-evidence:v5:${spKey}`)
+        ) {
+          unresolvedExtinctKeys.push(spKey);
+        }
+      }
+
+      const preloadedBasisMap =
+        unresolvedExtinctKeys.length > 0
+          ? await batchFetchEvidenceBasisCounts(unresolvedExtinctKeys)
+          : new Map<number, EvidenceBasisEntry>();
+
+      // Adım 3: Yaşam kanıtı ve biyolojik üyelik değerlendirmesi
+      const batchSettled = await runWithConcurrencyLimit(
+        preparedSettled,
+        DISCOVERY_CONCURRENCY_LIMIT,
+        async (p) => {
+          if (p.status !== 'fulfilled' || !p.value) return null;
+          if (p.value.kind === 'EARLY') return p.value;
+
+          const { resolvedSp, canonical, canonicalLower, synonymOf, localSciEntry } = p.value;
+          const spKey = Number(resolvedSp.key);
+          const evidence = await evaluateSpeciesEvidence(
+            resolvedSp,
+            localSciEntry,
+            preloadedBasisMap.get(spKey)
+          );
+          const membership = evaluateBiologicalMembership(
+            resolvedSp,
+            canonicalLower,
+            activeGroup,
+            evidence,
+            excludedSciSet,
+            excludedTaxonomySet
+          );
+
+          return {
+            kind: 'VERIFIED' as const,
+            resolvedSp,
+            canonical,
+            canonicalLower,
+            synonymOf,
+            localSciEntry,
+            evidence,
+            membership,
+          };
+        }
+      );
 
     const acceptedItems: DiscoveredSpeciesItem[] = [];
 
     for (const s of batchSettled) {
       if (s.status !== 'fulfilled' || !s.value) continue;
-      if ('earlyFiltered' in s.value) {
+      if (s.value.kind === 'EARLY') {
         if (s.value.earlyFiltered === 'FOSSIL') pool.filteredFossilCount++;
         else pool.filteredOutOfGroupCount++;
         continue;
@@ -5821,19 +7118,60 @@ export async function discoverSpeciesByGroup(
           async (cursor) => {
             const remainingBeforeCap = GBIF_SPECIES_SEARCH_MAX_OFFSET - cursor.nextOffset;
             if (remainingBeforeCap <= 0) {
-              return { cursor, offsetLimitHit: true as const, effectiveLimit: 0, json: null };
+              return { kind: 'OFFSET_LIMIT' as const, cursor, effectiveLimit: 0, json: null };
             }
             const effectiveLimit = Math.min(perCursorLimit, remainingBeforeCap);
             const bbUrl = `https://api.gbif.org/v1/species/search?datasetKey=${GBIF_BACKBONE_DATASET_KEY}&higherTaxonKey=${cursor.htKey}&rank=SPECIES&status=ACCEPTED&limit=${effectiveLimit}&offset=${cursor.nextOffset}`;
             const res = await fetchWithRetry(bbUrl, undefined, 2, 8000);
             if (!res.ok) {
-              if (res.status === 400 || (res.status >= 500 && cursor.nextOffset + effectiveLimit >= GBIF_SPECIES_SEARCH_MAX_OFFSET - 50)) {
-                return { cursor, offsetLimitHit: true as const, effectiveLimit, json: null };
+              const errBody = await res.text().catch(() => '');
+              if (res.status === 400) {
+                const isBoundaryExceeded =
+                  cursor.nextOffset >= GBIF_SPECIES_SEARCH_MAX_OFFSET ||
+                  cursor.nextOffset + effectiveLimit > GBIF_SPECIES_SEARCH_MAX_OFFSET;
+                const hasOffsetLimitBody =
+                  /max(?:imum)?\s*offset|offset\s*(?:must|cannot|can't|exceed|exceeded|limit|greater|<=|<)|exceeded.*offset|100[\s,.]?000/i.test(
+                    errBody
+                  );
+                if (isBoundaryExceeded || hasOffsetLimitBody) {
+                  return { kind: 'OFFSET_LIMIT' as const, cursor, effectiveLimit, json: null };
+                }
+                return {
+                  kind: 'REQUEST_ERROR' as const,
+                  cursor,
+                  effectiveLimit,
+                  statusCode: res.status,
+                  detail: errBody.trim().slice(0, 200),
+                };
               }
-              throw new Error(`GBIF Backbone species search HTTP ${res.status}`);
+              if (res.status >= 500) {
+                return {
+                  kind: 'SERVER_ERROR' as const,
+                  cursor,
+                  effectiveLimit,
+                  statusCode: res.status,
+                  detail: errBody.trim().slice(0, 200),
+                };
+              }
+              return {
+                kind: 'REQUEST_ERROR' as const,
+                cursor,
+                effectiveLimit,
+                statusCode: res.status,
+                detail: errBody.trim().slice(0, 200),
+              };
             }
             const json = await res.json();
-            return { cursor, offsetLimitHit: false as const, effectiveLimit, json };
+            if (!json || typeof json !== 'object' || !Array.isArray(json.results)) {
+              return {
+                kind: 'SERVER_ERROR' as const,
+                cursor,
+                effectiveLimit,
+                statusCode: res.status || 502,
+                detail: 'GBIF Backbone arama yanıtı beklenen results dizisini içermiyor',
+              };
+            }
+            return { kind: 'OK' as const, cursor, effectiveLimit, json };
           }
         );
 
@@ -5844,23 +7182,53 @@ export async function discoverSpeciesByGroup(
           const cursor = selectedCursors[i];
           if (ps.status !== 'fulfilled') {
             cursor.consecutiveFailures = (cursor.consecutiveFailures || 0) + 1;
-            if (cursor.consecutiveFailures >= 2) {
-              cursor.endOfRecords = true;
+            cursor.endOfRecords = true;
+            cursor.hitOffsetLimit = false;
+            pool.serverErrorReached = true;
+            if (!pool.catalogErrorMessage) {
+              const reasonMsg = ps.reason instanceof Error ? ps.reason.message : String(ps.reason || '');
+              pool.catalogErrorMessage = reasonMsg
+                ? `GBIF Backbone servisine erişilemedi (${reasonMsg}); şimdiye kadar getirilen kayıtlar korundu.`
+                : 'GBIF Backbone servisine erişilemedi; şimdiye kadar getirilen kayıtlar korundu.';
             }
             continue;
           }
-          allSelectedFailed = false;
-          cursor.consecutiveFailures = 0;
 
-          if (ps.value.offsetLimitHit) {
+          if (ps.value.kind === 'OFFSET_LIMIT') {
+            allSelectedFailed = false;
+            cursor.consecutiveFailures = 0;
             cursor.endOfRecords = true;
             cursor.hitOffsetLimit = true;
             pool.hitOffsetLimit = true;
             continue;
           }
 
+          if (ps.value.kind === 'SERVER_ERROR') {
+            cursor.consecutiveFailures = (cursor.consecutiveFailures || 0) + 1;
+            cursor.endOfRecords = true;
+            cursor.hitOffsetLimit = false;
+            pool.serverErrorReached = true;
+            if (!pool.catalogErrorMessage) {
+              pool.catalogErrorMessage = `GBIF Backbone sunucusundan geçici hata alındı (HTTP ${ps.value.statusCode}); şu ana kadar getirilen kayıtlar korundu.`;
+            }
+            continue;
+          }
+
+          if (ps.value.kind === 'REQUEST_ERROR') {
+            cursor.consecutiveFailures = (cursor.consecutiveFailures || 0) + 1;
+            cursor.endOfRecords = true;
+            cursor.hitOffsetLimit = false;
+            if (!pool.catalogErrorMessage) {
+              pool.catalogErrorMessage = `GBIF Backbone tür arama isteği reddedildi (HTTP ${ps.value.statusCode})${ps.value.detail ? `: ${ps.value.detail}` : '.'}`;
+            }
+            continue;
+          }
+
+          allSelectedFailed = false;
+          cursor.consecutiveFailures = 0;
+
           const { effectiveLimit, json } = ps.value;
-          const results: any[] = Array.isArray(json?.results) ? json.results : [];
+          const results: any[] = json.results;
           if (typeof json?.count === 'number') {
             cursor.apiTotalCount = json.count;
           }
@@ -5911,7 +7279,9 @@ export async function discoverSpeciesByGroup(
     }
   }
 
-  setCached(backbonePoolCacheKey, pool, 15 * 60 * 1000);
+  if (!pool.serverErrorReached && !pool.catalogErrorMessage) {
+    setCached(backbonePoolCacheKey, pool, 15 * 60 * 1000);
+  }
 
   // Sayfa dilimini kopyala (ülke bazlı gözlem sayıları paylaşılan katalog önbelleğini kirletmesin)
   const pageSpecies: DiscoveredSpeciesItem[] = pool.verifiedItems
@@ -5924,7 +7294,7 @@ export async function discoverSpeciesByGroup(
     : '&basisOfRecord=HUMAN_OBSERVATION&basisOfRecord=OBSERVATION&basisOfRecord=MACHINE_OBSERVATION&basisOfRecord=PRESERVED_SPECIMEN&basisOfRecord=MATERIAL_SAMPLE&basisOfRecord=LIVING_SPECIMEN';
 
   const pageKeys = pageSpecies.map(s => s.acceptedUsageKey);
-  const [scopeBatch, globalBatch, totalOccurrencesInScope] = await Promise.all([
+  const [scopeBatch, globalBatch, scopeTotalResult] = await Promise.all([
     fetchBatchOccurrenceCounts(pageKeys, countryCode, nonFossilBasisParam),
     countryCode
       ? fetchBatchOccurrenceCounts(pageKeys, '', nonFossilBasisParam)
@@ -5932,22 +7302,28 @@ export async function discoverSpeciesByGroup(
     fetchScopeTotalOccurrences(activeTaxonKeys, countryCode, nonFossilBasisParam),
   ]);
 
+  const totalOccurrencesStatus: OccurrenceCountStatus = scopeTotalResult.status;
+  const totalOccurrencesInScope: number | null =
+    scopeTotalResult.status === 'OK' ? scopeTotalResult.count : null;
+  const totalOccurrencesError: string | undefined =
+    scopeTotalResult.status === 'ERROR' ? scopeTotalResult.errorMessage : undefined;
+
   const scopeCountryParam = countryCode ? `&country=${encodeURIComponent(countryCode)}` : '';
   const hasWolfSubspeciesExcl =
     Boolean(activeGroup.excludedTaxonKeys && activeGroup.excludedTaxonKeys.length > 0) &&
     pageKeys.includes(5219173);
 
-  let exclScopeCount = 0;
-  let exclGlobalCount = 0;
+  let exclScopeResult: { status: OccurrenceCountStatus; count: number } = { status: 'OK', count: 0 };
+  let exclGlobalResult: { status: OccurrenceCountStatus; count: number } = { status: 'OK', count: 0 };
   if (hasWolfSubspeciesExcl && activeGroup.excludedTaxonKeys) {
     const [es, eg] = await Promise.all([
       fetchExcludedSubspeciesCount(activeGroup.excludedTaxonKeys, scopeCountryParam, nonFossilBasisParam),
       countryCode
         ? fetchExcludedSubspeciesCount(activeGroup.excludedTaxonKeys, '', nonFossilBasisParam)
-        : Promise.resolve(0),
+        : Promise.resolve<{ status: OccurrenceCountStatus; count: number }>({ status: 'OK', count: 0 }),
     ]);
-    exclScopeCount = es;
-    exclGlobalCount = countryCode ? eg : es;
+    exclScopeResult = es;
+    exclGlobalResult = countryCode ? eg : es;
   }
 
   let scopeOkCount = 0;
@@ -5968,12 +7344,12 @@ export async function discoverSpeciesByGroup(
     else scopeErrCount++;
 
     if (item.acceptedUsageKey === 5219173 && hasWolfSubspeciesExcl) {
-      if (scopeStatus === 'OK' && exclScopeCount > 0 && scopeCount > 0) {
-        scopeCount = Math.max(0, scopeCount - exclScopeCount);
-        item.excludedSubspeciesNote = `Evcil köpek (Canis familiaris / Canis lupus familiaris) kayıtları (${exclScopeCount.toLocaleString('tr-TR')}) çıkarıldı`;
+      if (scopeStatus === 'OK' && exclScopeResult.status === 'OK' && exclScopeResult.count > 0 && scopeCount > 0) {
+        scopeCount = Math.max(0, scopeCount - exclScopeResult.count);
+        item.excludedSubspeciesNote = `Evcil köpek (Canis familiaris / Canis lupus familiaris) kayıtları (${exclScopeResult.count.toLocaleString('tr-TR')}) çıkarıldı`;
       }
-      if (globalStatus === 'OK' && exclGlobalCount > 0 && globalCount > 0) {
-        globalCount = Math.max(0, globalCount - exclGlobalCount);
+      if (globalStatus === 'OK' && exclGlobalResult.status === 'OK' && exclGlobalResult.count > 0 && globalCount > 0) {
+        globalCount = Math.max(0, globalCount - exclGlobalResult.count);
       }
     }
 
@@ -5984,31 +7360,36 @@ export async function discoverSpeciesByGroup(
   }
 
   const occurrenceEnrichmentStatus: 'OK' | 'PARTIAL_ERROR' | 'ERROR' =
-    scopeErrCount === 0 && !globalBatch?.hasErrors
+    scopeErrCount === 0 && !globalBatch?.hasErrors && totalOccurrencesStatus === 'OK'
       ? 'OK'
-      : scopeOkCount === 0 && scopeErrCount > 0
+      : scopeOkCount === 0 && (scopeErrCount > 0 || totalOccurrencesStatus === 'ERROR')
         ? 'ERROR'
         : 'PARTIAL_ERROR';
 
-  // Opsiyonel iNaturalist zenginleştirme (yalnızca sayfa dilimi, max 5 paralel istek; yanlış tür fotoğrafı asla alınmaz)
+  // Opsiyonel iNaturalist zenginleştirme (yalnızca sayfa dilimi, tek-istekli lite mod, max 2 eşzamanlı host kuyruğu; hatalar önbelleğe alınmaz)
+  let inatHadError = false;
   if (enrichWithInaturalist && pageSpecies.length > 0) {
     const inatSettled = await runWithConcurrencyLimit(
       pageSpecies,
-      DISCOVERY_CONCURRENCY_LIMIT,
+      2,
       async (item) => {
-        const inatCacheKey = `inat-taxon:v1:${item.canonicalName.toLowerCase()}`;
-        let inat = getCached<Awaited<ReturnType<typeof fetchInatTaxon>>>(inatCacheKey);
-        if (inat === null && !GBIF_CACHE.has(inatCacheKey)) {
-          inat = await fetchInatTaxon(item.canonicalName);
-          setCached(inatCacheKey, inat, 30 * 60 * 1000);
-        }
-        return { item, inat };
+        const outcome = await fetchInatTaxon(item.canonicalName, { includeSummary: false });
+        return { item, outcome };
       }
     );
 
     for (const is of inatSettled) {
-      if (is.status !== 'fulfilled' || !is.value.inat) continue;
-      const { item, inat } = is.value;
+      if (is.status !== 'fulfilled') {
+        inatHadError = true;
+        continue;
+      }
+      const { item, outcome } = is.value;
+      if (outcome.status === 'ERROR') {
+        inatHadError = true;
+        continue;
+      }
+      if (outcome.status !== 'FOUND') continue;
+      const inat = outcome.data;
       if (!item.turkishName && inat.turkishName) item.turkishName = inat.turkishName;
       if (!item.englishName && inat.englishName) item.englishName = inat.englishName;
       if (inat.photoUrl) item.photoUrl = inat.photoUrl;
@@ -6038,36 +7419,56 @@ export async function discoverSpeciesByGroup(
   const rawBackboneSum = pool.taxonCursors.reduce((acc, c) => acc + (c.apiTotalCount || 0), 0);
   // GBIF Backbone sorgu eşleşme sayısı (fosil/kapsam filtrelerinden önceki ham API eşleşmesi; sayfalama boyunca sabit kalır)
   const backboneMatchCount = isDirectFiniteList ? totalDiscovered : rawBackboneSum;
-  // Filtrelenmiş kesin toplam yalnızca tüm katalog tarandığında (ve 100k API sınırı kesintisi yoksa) belirlenir; tahmin yürütülmez
+  // Filtrelenmiş kesin toplam yalnızca tüm katalog tarandığında (ve 100k API sınırı veya katalog hatası kesintisi yoksa) belirlenir; tahmin yürütülmez
   const filteredCatalogCount: number | null =
-    !hasMore && pool.nextRawCandidateIndex >= pool.rawCandidates.length && !pool.hitOffsetLimit
+    !hasMore &&
+    pool.nextRawCandidateIndex >= pool.rawCandidates.length &&
+    !pool.hitOffsetLimit &&
+    !pool.serverErrorReached &&
+    !pool.catalogErrorMessage
       ? totalDiscovered
       : null;
   const backboneTotalCount = backboneMatchCount;
   const offsetLimitReached = pool.hitOffsetLimit && !hasMoreBackbone;
+  const serverErrorReached = pool.serverErrorReached;
+  const catalogErrorMessage = pool.catalogErrorMessage;
+
+  const scopeTotalSummaryText =
+    totalOccurrencesStatus === 'OK' && totalOccurrencesInScope !== null
+      ? `${countryName} kapsamında ${totalOccurrencesInScope.toLocaleString('tr-TR')} gözlem kaydı mevcut.`
+      : `${countryName} toplam gözlem sayısı alınamadı (GBIF API hatası).`;
 
   const noticeParts: string[] = [];
   if (totalDiscovered > 0) {
     if (filteredCatalogCount !== null) {
       noticeParts.push(
-        `${activeGroup.label} için filtreler sonrası katalogda toplam ${filteredCatalogCount.toLocaleString('tr-TR')} tür doğrulandı (GBIF Backbone ham eşleşme: ${backboneMatchCount.toLocaleString('tr-TR')}); ${countryName} kapsamında ${totalOccurrencesInScope.toLocaleString('tr-TR')} gözlem kaydı mevcut.`
+        `${activeGroup.label} için filtreler sonrası katalogda toplam ${filteredCatalogCount.toLocaleString('tr-TR')} tür doğrulandı (GBIF Backbone ham eşleşme: ${backboneMatchCount.toLocaleString('tr-TR')}); ${scopeTotalSummaryText}`
       );
     } else {
       noticeParts.push(
-        `${activeGroup.label} için şu ana kadar ${totalDiscovered.toLocaleString('tr-TR')} kabul edilmiş tür doğrulandı (GBIF Backbone ham sorgu eşleşmesi: ~${backboneMatchCount.toLocaleString('tr-TR')} tür, fosil/kapsam filtreleri tarama ilerledikçe uygulanır); ${countryName} kapsamında ${totalOccurrencesInScope.toLocaleString('tr-TR')} gözlem kaydı mevcut.`
+        `${activeGroup.label} için şu ana kadar ${totalDiscovered.toLocaleString('tr-TR')} kabul edilmiş tür doğrulandı (GBIF Backbone ham sorgu eşleşmesi: ~${backboneMatchCount.toLocaleString('tr-TR')} tür, fosil/kapsam filtreleri tarama ilerledikçe uygulanır); ${scopeTotalSummaryText}`
       );
     }
-  } else {
+  } else if (!catalogErrorMessage) {
     noticeParts.push(
-      `${activeGroup.label} grubu için GBIF Backbone üzerinde kriterlere uygun kabul edilmiş tür bulunamadı.`
+      `${activeGroup.label} grubu için GBIF Backbone üzerinde kriterlere uygun kabul edilmiş tür bulunamadı (${scopeTotalSummaryText}).`
     );
+  }
+  if (catalogErrorMessage) {
+    noticeParts.push(catalogErrorMessage);
   }
   if (offsetLimitReached) {
     noticeParts.push(
       'GBIF /v1/species/search servisinin 100.000 kayıtlık sayfalama sınırına ulaşıldı; sınır içindeki kayıtlar korundu ancak sınır ötesindeki ek türler bu uç üzerinden getirilemiyor (alt gruplara bölerek daha dar taksonlarda tarayabilirsiniz).'
     );
   }
-  if (occurrenceEnrichmentStatus !== 'OK') {
+  if (totalOccurrencesStatus === 'ERROR') {
+    noticeParts.push(
+      totalOccurrencesError ||
+        `${countryName} toplam gözlem sayısı GBIF servisinden alınamadı (0 olarak gösterilmedi).`
+    );
+  }
+  if (scopeErrCount > 0 || globalBatch?.hasErrors) {
     noticeParts.push(
       'Bazı türler için GBIF gözlem sayısı servisinden yanıt alınamadı; ilgili türler katalogdan çıkarılmadı ve "Veri alınamadı" olarak işaretlendi.'
     );
@@ -6096,8 +7497,12 @@ export async function discoverSpeciesByGroup(
     activeGroupId: activeGroup.id,
     species: pageSpecies,
     totalOccurrencesInScope,
+    totalOccurrencesStatus,
+    totalOccurrencesError,
     occurrenceEnrichmentStatus,
     offsetLimitReached,
+    serverErrorReached,
+    catalogErrorMessage,
     pagination: {
       page,
       pageSize,
@@ -6106,6 +7511,7 @@ export async function discoverSpeciesByGroup(
       backboneMatchCount,
       filteredCatalogCount,
       offsetLimitReached,
+      serverErrorReached,
       hasMore,
       facetOffset: targetStartIdx,
       nextFacetOffset: hasMore ? targetEndIdx : null,
@@ -6118,8 +7524,15 @@ export async function discoverSpeciesByGroup(
     queriedAt: new Date().toISOString(),
   };
 
-  if (occurrenceEnrichmentStatus === 'OK') {
+  if (
+    occurrenceEnrichmentStatus === 'OK' &&
+    totalOccurrencesStatus === 'OK' &&
+    !serverErrorReached &&
+    !catalogErrorMessage &&
+    !inatHadError
+  ) {
     setCached(discoveryCacheKey, result, 15 * 60 * 1000);
   }
   return result;
+  });
 }

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { InteractiveMap } from '../components/InteractiveMap';
-import { SpeciesAnalysis } from '../types/biodiversity';
+import { SpeciesAnalysis, SearchErrorType } from '../types/biodiversity';
 import { MapPin, Search, Compass, AlertCircle } from 'lucide-react';
 
 interface MapPageProps {
@@ -10,6 +10,7 @@ interface MapPageProps {
   isLoading: boolean;
   onCountryChange: (country: string) => void;
   errorMessage?: string | null;
+  errorType?: SearchErrorType | null;
 }
 
 export const MapPage: React.FC<MapPageProps> = ({
@@ -19,8 +20,10 @@ export const MapPage: React.FC<MapPageProps> = ({
   isLoading,
   onCountryChange,
   errorMessage,
+  errorType,
 }) => {
   const [searchInput, setSearchInput] = useState<string>('');
+  const isApiError = errorType === 'ERROR';
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -117,18 +120,36 @@ export const MapPage: React.FC<MapPageProps> = ({
           </p>
         </div>
       ) : errorMessage ? (
-        <div className="p-6 rounded-2xl bg-rose-950/40 border border-rose-700/50 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div
+          className={`p-6 rounded-2xl border flex flex-col sm:flex-row items-center justify-between gap-4 ${
+            isApiError
+              ? 'bg-amber-950/40 border-amber-700/50'
+              : 'bg-rose-950/40 border-rose-700/50'
+          }`}
+        >
           <div className="flex items-center gap-3">
-            <AlertCircle className="w-6 h-6 text-rose-400 shrink-0" />
+            <AlertCircle
+              className={`w-6 h-6 shrink-0 ${isApiError ? 'text-amber-400' : 'text-rose-400'}`}
+            />
             <div>
-              <h3 className="text-sm font-bold text-rose-200 mb-0.5">Harita Verisi Bulunamadı</h3>
-              <p className="text-sm text-rose-200/90">{errorMessage}</p>
+              <h3
+                className={`text-sm font-bold mb-0.5 ${
+                  isApiError ? 'text-amber-200' : 'text-rose-200'
+                }`}
+              >
+                {isApiError ? 'Veri Kaynağına Erişilemedi' : 'Sonuç Bulunamadı'}
+              </h3>
+              <p className={`text-sm ${isApiError ? 'text-amber-200/90' : 'text-rose-200/90'}`}>
+                {errorMessage}
+              </p>
             </div>
           </div>
           <button
             type="button"
             onClick={() => onSearch('Ursus arctos', activeCountry)}
-            className="px-4 py-2 bg-rose-900/60 hover:bg-rose-800/60 text-white rounded-xl text-xs font-semibold transition-colors shrink-0 cursor-pointer"
+            className={`px-4 py-2 text-white rounded-xl text-xs font-semibold transition-colors shrink-0 cursor-pointer ${
+              isApiError ? 'bg-amber-800/70 hover:bg-amber-700/80' : 'bg-rose-900/60 hover:bg-rose-800/60'
+            }`}
           >
             Bozayı Kaydını Yükle
           </button>
