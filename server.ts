@@ -8,7 +8,9 @@ import {
   fetchSpeciesAnalysis, 
   matchSpecies, 
   extractSpeciesAndParameters,
-  COMMON_TURKISH_SPECIES 
+  COMMON_TURKISH_SPECIES,
+  verifyImageAssetUrl,
+  ImageAssetVerificationResult
 } from './src/services/gbif.ts';
 import { SpeciesAnalysis, ResearchParameters } from './src/types/biodiversity.ts';
 
@@ -990,6 +992,108 @@ app.post('/api/species/compare', async (req: Request, res: Response): Promise<vo
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Karşılaştırma verisi alınamadı.' });
   }
+});
+
+function isSafeExternalImageUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      !host ||
+      host === 'localhost' ||
+      host.endsWith('.localhost') ||
+      host.endsWith('.local') ||
+      host === '::1' ||
+      host === '[::1]' ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^0\./.test(host) ||
+      /^169\.254\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+      /^\[?(fe80|fc00|fd)/i.test(host)
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Server-side Image Verification (status + Content-Type + magic bytes, zero browser CORS errors)
+app.get('/api/media/verify', async (req: Request, res: Response): Promise<void> => {
+  const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+  if (!rawUrl || !isSafeExternalImageUrl(rawUrl)) {
+    res.json({
+      verified: false,
+      status: 0,
+      contentType: null,
+      magicType: null,
+      reason: 'INVALID_OR_UNSAFE_URL',
+    } satisfies ImageAssetVerificationResult);
+    return;
+  }
+  try {
+    const result = await verifyImageAssetUrl(rawUrl, 4500);
+    res.json(result);
+  } catch {
+    res.json({
+      verified: false,
+      status: 0,
+      contentType: null,
+      magicType: null,
+      reason: 'VERIFY_ERROR',
+    } satisfies ImageAssetVerificationResult);
+  }
+});
+
+app.post('/api/media/verify-batch', async (req: Request, res: Response): Promise<void> => {
+  const urlsInput: unknown[] = Array.isArray(req.body?.urls) ? req.body.urls : [];
+  const filteredUrls: string[] = urlsInput
+    .filter((u): u is string => typeof u === 'string' && u.trim().length > 0)
+    .map((u) => u.trim());
+  const uniqueUrls: string[] = Array.from(new Set<string>(filteredUrls)).slice(0, 24);
+
+  const results: Record<string, ImageAssetVerificationResult> = {};
+  const validUrls: string[] = [];
+
+  for (const u of uniqueUrls) {
+    if (!isSafeExternalImageUrl(u)) {
+      results[u] = {
+        verified: false,
+        status: 0,
+        contentType: null,
+        magicType: null,
+        reason: 'INVALID_OR_UNSAFE_URL',
+      };
+    } else {
+      validUrls.push(u);
+    }
+  }
+
+  const concurrency = 6;
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(concurrency, validUrls.length) }, async () => {
+    while (idx < validUrls.length) {
+      const current = validUrls[idx++];
+      try {
+        results[current] = await verifyImageAssetUrl(current, 4000);
+      } catch {
+        results[current] = {
+          verified: false,
+          status: 0,
+          contentType: null,
+          magicType: null,
+          reason: 'VERIFY_ERROR',
+        };
+      }
+    }
+  });
+
+  await Promise.all(workers);
+  res.json({ results });
 });
 
 // Start Full-Stack Server

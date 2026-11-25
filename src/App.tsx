@@ -19,6 +19,7 @@ import { SpeciesAnalysis, SearchErrorType } from './types/biodiversity';
 
 const STORAGE_SPECIES_KEY = 'canli_atlasi_species';
 const STORAGE_COUNTRY_KEY = 'canli_atlasi_country';
+const STORAGE_COMMON_NAME_KEY = 'canli_atlasi_common_name';
 
 function readStoredValue(key: string, fallback: string): string {
   try {
@@ -29,10 +30,11 @@ function readStoredValue(key: string, fallback: string): string {
   }
 }
 
-function writeStoredSelection(species: string, country: string): void {
+function writeStoredSelection(species: string, country: string, commonName: string = ''): void {
   try {
     sessionStorage.setItem(STORAGE_SPECIES_KEY, species);
     sessionStorage.setItem(STORAGE_COUNTRY_KEY, country);
+    sessionStorage.setItem(STORAGE_COMMON_NAME_KEY, commonName);
   } catch {
     // sessionStorage erişilemezse sessizce geç
   }
@@ -41,6 +43,8 @@ function writeStoredSelection(species: string, country: string): void {
 interface ExecuteSearchOptions {
   updateUrl?: boolean;
   navigateToAnalysis?: boolean;
+  commonName?: string;
+  clearCommonName?: boolean;
 }
 
 function MainRouter() {
@@ -56,8 +60,14 @@ function MainRouter() {
   const [isLoadingSecondary, setIsLoadingSecondary] = useState<boolean>(false);
   const [activeCountry, setActiveCountry] = useState<string>(() => readStoredValue(STORAGE_COUNTRY_KEY, 'TR'));
   const [lastSpeciesName, setLastSpeciesName] = useState<string>(() => readStoredValue(STORAGE_SPECIES_KEY, 'Ursus arctos'));
+  const [lastCommonName, setLastCommonName] = useState<string>(() => readStoredValue(STORAGE_COMMON_NAME_KEY, ''));
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [errorType, setErrorType] = useState<SearchErrorType | null>(null);
+  const [lastAttemptedSearch, setLastAttemptedSearch] = useState<{
+    query: string;
+    country: string;
+    options: ExecuteSearchOptions;
+  } | null>(null);
 
   // Race condition prevention sequence counter and active request key
   const searchSeqRef = useRef(0);
@@ -80,19 +90,34 @@ function MainRouter() {
     }
 
     const speciesParam = searchParams.get('species')?.trim();
+    const commonNameParam = searchParams.get('commonName')?.trim() || '';
     const targetCountry = countryParam !== null ? countryParam : activeCountry;
 
     if (speciesParam) {
-      const isAlreadyLoaded =
-        primaryAnalysis &&
-        primaryAnalysis.countryCode === targetCountry &&
-        (primaryAnalysis.species.canonicalName?.toLowerCase() === speciesParam.toLowerCase() ||
-          primaryAnalysis.species.scientificName?.toLowerCase() === speciesParam.toLowerCase());
+      const effectiveCommonName =
+        commonNameParam ||
+        (speciesParam.toLowerCase() === lastSpeciesName.toLowerCase() ? lastCommonName : '');
 
-      const requestKey = `${speciesParam.toLowerCase()}::${targetCountry}`;
+      const matchesLoadedSpecies = Boolean(
+        primaryAnalysis &&
+          primaryAnalysis.countryCode === targetCountry &&
+          (primaryAnalysis.species.canonicalName?.toLowerCase() === speciesParam.toLowerCase() ||
+            primaryAnalysis.species.scientificName?.toLowerCase() === speciesParam.toLowerCase())
+      );
+      const matchesCommonName =
+        !effectiveCommonName ||
+        primaryAnalysis?.species.turkishName?.toLowerCase() === effectiveCommonName.toLowerCase();
+
+      const isAlreadyLoaded = matchesLoadedSpecies && matchesCommonName;
+      const requestKey = `${speciesParam.toLowerCase()}::${targetCountry}::${effectiveCommonName.toLowerCase()}`;
 
       if (!isAlreadyLoaded && inFlightKeyRef.current !== requestKey) {
-        executeSearch(speciesParam, targetCountry, { updateUrl: false, navigateToAnalysis: false });
+        executeSearch(speciesParam, targetCountry, {
+          updateUrl: false,
+          navigateToAnalysis: false,
+          commonName: effectiveCommonName,
+          clearCommonName: !effectiveCommonName,
+        });
       }
       return;
     }
@@ -100,17 +125,34 @@ function MainRouter() {
     // Species view pages (/analiz, /harita, /karsilastir) without ?species= param
     if (isSpeciesViewRoute) {
       const targetSpecies = primaryAnalysis?.species.canonicalName || primaryAnalysis?.species.scientificName || lastSpeciesName || 'Ursus arctos';
+      const activeCommon =
+        targetSpecies.toLowerCase() === lastSpeciesName.toLowerCase() ? lastCommonName : '';
       if (primaryAnalysis && primaryAnalysis.countryCode === targetCountry) {
-        setSearchParams({ species: targetSpecies, country: targetCountry }, { replace: true });
+        const nextParams = new URLSearchParams({ species: targetSpecies, country: targetCountry });
+        if (activeCommon) nextParams.set('commonName', activeCommon);
+        setSearchParams(nextParams, { replace: true });
       } else {
-        executeSearch(targetSpecies, targetCountry, { updateUrl: true, navigateToAnalysis: false });
+        executeSearch(targetSpecies, targetCountry, {
+          updateUrl: true,
+          navigateToAnalysis: false,
+          commonName: activeCommon,
+          clearCommonName: !activeCommon,
+        });
       }
       return;
     }
 
     // Initial background preload on HomePage if nothing loaded yet
     if (location.pathname === '/' && !primaryAnalysis && !isLoading && !errorMessage && searchSeqRef.current === 0) {
-      executeSearch(lastSpeciesName || 'Ursus arctos', targetCountry, { updateUrl: false, navigateToAnalysis: false });
+      const initialSpecies = lastSpeciesName || 'Ursus arctos';
+      const initialCommon =
+        initialSpecies.toLowerCase() === lastSpeciesName.toLowerCase() ? lastCommonName : '';
+      executeSearch(initialSpecies, targetCountry, {
+        updateUrl: false,
+        navigateToAnalysis: false,
+        commonName: initialCommon,
+        clearCommonName: !initialCommon,
+      });
     }
   }, [location.pathname, searchParams]);
 
@@ -122,9 +164,14 @@ function MainRouter() {
     const cleanQuery = query.trim();
     if (!cleanQuery) return;
 
-    const { updateUrl = true, navigateToAnalysis = false } = options;
+    const { updateUrl = true, navigateToAnalysis = false, commonName, clearCommonName = false } = options;
+    const preferredCommonName = commonName?.trim()
+      ? commonName.trim()
+      : !clearCommonName && cleanQuery.toLowerCase() === lastSpeciesName.toLowerCase()
+        ? lastCommonName
+        : '';
     const currentSeq = ++searchSeqRef.current;
-    const requestKey = `${cleanQuery.toLowerCase()}::${country}`;
+    const requestKey = `${cleanQuery.toLowerCase()}::${country}::${preferredCommonName.toLowerCase()}`;
     inFlightKeyRef.current = requestKey;
 
     setIsLoading(true);
@@ -132,6 +179,7 @@ function MainRouter() {
     setErrorType(null);
     setActiveCountry(country);
     setPrimaryAnalysis(null);
+    setLastAttemptedSearch({ query: cleanQuery, country, options });
 
     try {
       const intent = await resolveSearchIntent(cleanQuery, country);
@@ -141,7 +189,7 @@ function MainRouter() {
       if (intent.mode === 'TAXON_GROUP_DISCOVERY') {
         inFlightKeyRef.current = null;
         setIsLoading(false);
-        writeStoredSelection(lastSpeciesName, country);
+        writeStoredSelection(lastSpeciesName, country, lastCommonName);
         navigate(`/kesfet?q=${encodeURIComponent(cleanQuery)}&country=${encodeURIComponent(country)}`);
         return;
       }
@@ -163,7 +211,11 @@ function MainRouter() {
           ? intent.matchedSpecies.canonicalName || intent.matchedSpecies.scientificName
           : cleanQuery;
 
-      const data = await fetchSpeciesAnalysis(targetQuery, country);
+      const data = await fetchSpeciesAnalysis(targetQuery, {
+        countryCode: country,
+        preMatchedSpecies: intent.mode === 'SINGLE_SPECIES' ? intent.matchedSpecies : undefined,
+        preferredTurkishName: preferredCommonName || undefined,
+      });
 
       if (currentSeq !== searchSeqRef.current) return;
 
@@ -180,15 +232,28 @@ function MainRouter() {
       }
 
       const canonicalOrSci = data.species.canonicalName || data.species.scientificName;
+      const storedCommonName =
+        preferredCommonName &&
+        preferredCommonName.toLowerCase() !== canonicalOrSci.toLowerCase() &&
+        (canonicalOrSci.toLowerCase() === cleanQuery.toLowerCase() ||
+          targetQuery.toLowerCase() === canonicalOrSci.toLowerCase())
+          ? preferredCommonName
+          : '';
       inFlightKeyRef.current = null;
       setPrimaryAnalysis(data);
       setLastSpeciesName(canonicalOrSci);
-      writeStoredSelection(canonicalOrSci, country);
+      setLastCommonName(storedCommonName);
+      writeStoredSelection(canonicalOrSci, country, storedCommonName);
+
+      const nextUrlParams = new URLSearchParams({ species: canonicalOrSci, country });
+      if (storedCommonName) {
+        nextUrlParams.set('commonName', storedCommonName);
+      }
 
       if (navigateToAnalysis) {
-        navigate(`/analiz?species=${encodeURIComponent(canonicalOrSci)}&country=${encodeURIComponent(country)}`);
+        navigate(`/analiz?${nextUrlParams.toString()}`);
       } else if (updateUrl && isSpeciesViewRoute) {
-        setSearchParams({ species: canonicalOrSci, country }, { replace: true });
+        setSearchParams(nextUrlParams, { replace: true });
       }
 
       if (isCompareMode && secondaryAnalysis) {
@@ -226,7 +291,7 @@ function MainRouter() {
   const handleCountryChange = (nextCountry: string) => {
     setActiveCountry(nextCountry);
     if (location.pathname === '/kesfet') {
-      writeStoredSelection(lastSpeciesName, nextCountry);
+      writeStoredSelection(lastSpeciesName, nextCountry, lastCommonName);
       return;
     }
     const targetQuery =
@@ -234,9 +299,13 @@ function MainRouter() {
       primaryAnalysis?.species?.scientificName ||
       lastSpeciesName ||
       'Ursus arctos';
+    const preservedCommonName =
+      targetQuery.toLowerCase() === lastSpeciesName.toLowerCase() ? lastCommonName : '';
     executeSearch(targetQuery, nextCountry, {
       updateUrl: isSpeciesViewRoute,
       navigateToAnalysis: false,
+      commonName: preservedCommonName,
+      clearCommonName: !preservedCommonName,
     });
   };
 
@@ -265,6 +334,19 @@ function MainRouter() {
     }
   };
 
+  const handleRetryLastSearch = () => {
+    if (lastAttemptedSearch) {
+      executeSearch(lastAttemptedSearch.query, lastAttemptedSearch.country, lastAttemptedSearch.options);
+      return;
+    }
+    const speciesParam = searchParams.get('species')?.trim();
+    const fallbackQuery = speciesParam || lastSpeciesName || 'Ursus arctos';
+    executeSearch(fallbackQuery, activeCountry, {
+      updateUrl: isSpeciesViewRoute,
+      navigateToAnalysis: false,
+    });
+  };
+
   const activeSpeciesForNav =
     primaryAnalysis?.species?.canonicalName ||
     primaryAnalysis?.species?.scientificName ||
@@ -277,12 +359,13 @@ function MainRouter() {
     <div className="min-h-screen bg-[#0b1510] text-[#e8f0ec] flex flex-col font-sans selection:bg-emerald-600 selection:text-white">
       {/* Navigation Bar */}
       <Navbar
-        onQuickSearch={(query) => executeSearch(query, activeCountry, { updateUrl: true, navigateToAnalysis: true })}
+        onQuickSearch={(query) => executeSearch(query, activeCountry, { updateUrl: true, navigateToAnalysis: true, clearCommonName: true })}
         isCompareMode={isCompareMode}
         onToggleCompare={handleToggleCompare}
-        onSelectSpecies={(sciName) => executeSearch(sciName, activeCountry, { updateUrl: true, navigateToAnalysis: true })}
+        onSelectSpecies={(sciName) => executeSearch(sciName, activeCountry, { updateUrl: true, navigateToAnalysis: true, clearCommonName: true })}
         activeSpecies={activeSpeciesForNav}
         activeCountry={activeCountry}
+        activeCommonName={activeSpeciesForNav?.toLowerCase() === lastSpeciesName.toLowerCase() ? lastCommonName : ''}
       />
 
       {/* Main Multi-Page Content Router */}
@@ -292,12 +375,13 @@ function MainRouter() {
             path="/"
             element={
               <HomePage
-                onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: true })}
+                onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: true, clearCommonName: true })}
                 isLoading={isLoading}
                 activeCountry={activeCountry}
                 onCountryChange={handleCountryChange}
                 errorMessage={errorMessage}
                 errorType={errorType}
+                onRetry={handleRetryLastSearch}
               />
             }
           />
@@ -305,13 +389,18 @@ function MainRouter() {
             path="/kesfet"
             element={
               <ExplorePage
-                onSelectSpecies={(sciName, country) => {
-                  executeSearch(sciName, country, { updateUrl: true, navigateToAnalysis: true });
+                onSelectSpecies={(sciName, country, turkishName) => {
+                  executeSearch(sciName, country, {
+                    updateUrl: true,
+                    navigateToAnalysis: true,
+                    commonName: turkishName,
+                    clearCommonName: !turkishName,
+                  });
                 }}
                 activeCountry={activeCountry}
                 onCountryChange={(c) => {
                   setActiveCountry(c);
-                  writeStoredSelection(lastSpeciesName, c);
+                  writeStoredSelection(lastSpeciesName, c, lastCommonName);
                 }}
               />
             }
@@ -322,11 +411,12 @@ function MainRouter() {
               <MapPage
                 primaryAnalysis={primaryAnalysis}
                 activeCountry={activeCountry}
-                onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: false })}
+                onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: false, clearCommonName: true })}
                 isLoading={effectiveSpeciesViewLoading}
                 onCountryChange={handleCountryChange}
                 errorMessage={errorMessage}
                 errorType={errorType}
+                onRetry={handleRetryLastSearch}
               />
             }
           />
@@ -336,11 +426,12 @@ function MainRouter() {
               <AnalysisPage
                 primaryAnalysis={primaryAnalysis}
                 activeCountry={activeCountry}
-                onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: false })}
+                onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: false, clearCommonName: true })}
                 isLoading={effectiveSpeciesViewLoading}
                 onCountryChange={handleCountryChange}
                 errorMessage={errorMessage}
                 errorType={errorType}
+                onRetry={handleRetryLastSearch}
               />
             }
           />
@@ -355,7 +446,8 @@ function MainRouter() {
                 isLoading={effectiveSpeciesViewLoading}
                 errorMessage={errorMessage}
                 errorType={errorType}
-                onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: false })}
+                onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: false, clearCommonName: true })}
+                onRetry={handleRetryLastSearch}
                 activeCountry={activeCountry}
               />
             }
@@ -368,12 +460,13 @@ function MainRouter() {
             path="*"
             element={
               <HomePage
-                onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: true })}
+                onSearch={(q, c) => executeSearch(q, c, { updateUrl: true, navigateToAnalysis: true, clearCommonName: true })}
                 isLoading={isLoading}
                 activeCountry={activeCountry}
                 onCountryChange={handleCountryChange}
                 errorMessage={errorMessage}
                 errorType={errorType}
+                onRetry={handleRetryLastSearch}
               />
             }
           />

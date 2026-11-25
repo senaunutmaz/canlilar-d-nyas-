@@ -24,6 +24,7 @@ export interface SpeciesInfo {
   isMatched?: boolean;
   photoUrl?: string;
   photoAttribution?: string;
+  photoSource?: string;
   iucnStatus?: 'EX' | 'EW' | 'CR' | 'EN' | 'VU' | 'NT' | 'LC' | 'DD' | 'NE' | string;
   iucnCategoryName?: string;
   iucnSource?: string;
@@ -133,6 +134,8 @@ export interface FetchSpeciesOptions {
   endYear?: number;
   limit?: number;
   fetchExtraPages?: boolean;
+  preMatchedSpecies?: SpeciesInfo;
+  preferredTurkishName?: string;
 }
 
 export interface DiscoverySpecimen {
@@ -251,6 +254,7 @@ export interface DiscoveredSpeciesItem {
   synonymOf?: string;
   photoUrl?: string;
   photoAttribution?: string;
+  photoSource?: string;
   iucnStatus?: string;
   iucnCategoryName?: string;
   iucnSource?: string;

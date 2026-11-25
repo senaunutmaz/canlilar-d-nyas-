@@ -4,7 +4,7 @@ import { TaxonGroupExplorer } from '../components/TaxonGroupExplorer';
 import { Search, Compass, ArrowRight } from 'lucide-react';
 
 interface ExplorePageProps {
-  onSelectSpecies: (scientificName: string, country: string) => void;
+  onSelectSpecies: (scientificName: string, country: string, turkishName?: string) => void;
   activeCountry: string;
   onCountryChange: (country: string) => void;
 }
@@ -101,8 +101,8 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({
       <TaxonGroupExplorer
         searchQuery={activeQuery}
         countryCode={effectiveCountry}
-        onSelectSpecies={(sciName, country) => {
-          onSelectSpecies(sciName, country);
+        onSelectSpecies={(sciName, country, turkishName) => {
+          onSelectSpecies(sciName, country, turkishName);
         }}
         onBackToDefault={() => navigate('/')}
         onCountryChange={(nextCountry) => {

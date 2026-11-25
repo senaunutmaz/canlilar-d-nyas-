@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { SpeciesAnalysis } from '../types/biodiversity';
-import { Info, ExternalLink, Calendar, MapPin, Database, ShieldAlert, Award, FileText } from 'lucide-react';
+import { Info, ExternalLink, Calendar, MapPin, Database, ShieldAlert, Award, FileText, ImageOff } from 'lucide-react';
 
 interface SpeciesOverviewProps {
   analysis: SpeciesAnalysis;
@@ -18,6 +18,12 @@ export const SpeciesOverview: React.FC<SpeciesOverviewProps> = ({ analysis }) =>
     countryName,
     dataQualityNotice 
   } = analysis;
+
+  const [imgLoadFailed, setImgLoadFailed] = useState(false);
+
+  useEffect(() => {
+    setImgLoadFailed(false);
+  }, [species.photoUrl]);
 
   const coordinatePercentage = downloadedRecordsCount > 0 
     ? Math.round((mappedRecordsCount / downloadedRecordsCount) * 100) 
@@ -67,8 +73,12 @@ export const SpeciesOverview: React.FC<SpeciesOverviewProps> = ({ analysis }) =>
       {/* Top Taxonomy Breadcrumb */}
       <div className="flex flex-wrap items-center gap-1.5 text-xs text-emerald-300/70 font-mono mb-4">
         <span>{species.kingdom || 'Animalia'}</span>
-        <span>›</span>
-        <span>{species.phylum || 'Chordata'}</span>
+        {species.phylum && (
+          <>
+            <span>›</span>
+            <span>{species.phylum}</span>
+          </>
+        )}
         {species.class && (
           <>
             <span>›</span>
@@ -93,17 +103,18 @@ export const SpeciesOverview: React.FC<SpeciesOverviewProps> = ({ analysis }) =>
         {/* Left: Species Photo & IUCN Badge */}
         <div className="lg:col-span-4 flex flex-col gap-3">
           <div className="relative aspect-4/3 w-full rounded-xl overflow-hidden bg-[#0b1510] border border-emerald-800/40 shadow-inner group">
-            {species.photoUrl ? (
+            {species.photoUrl && !imgLoadFailed ? (
               <img
                 src={species.photoUrl}
                 alt={species.turkishName || species.scientificName}
                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                 referrerPolicy="no-referrer"
+                onError={() => setImgLoadFailed(true)}
               />
             ) : (
               <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center text-emerald-400/60">
-                <Database className="w-12 h-12 mb-2 stroke-1" />
-                <p className="text-xs">Fotoğraf iNaturalist arşivinde aranıyor</p>
+                <ImageOff className="w-10 h-10 mb-2 stroke-1 text-emerald-500/45" />
+                <p className="text-xs">Bu tür için doğrulanmış görsel kaydı bulunamadı</p>
               </div>
             )}
             
@@ -114,8 +125,8 @@ export const SpeciesOverview: React.FC<SpeciesOverviewProps> = ({ analysis }) =>
             </div>
           </div>
 
-          {species.photoAttribution && (
-            <p className="text-[11px] text-emerald-300/50 truncate">
+          {species.photoUrl && !imgLoadFailed && species.photoAttribution && (
+            <p className="text-[11px] text-emerald-300/50 truncate" title={species.photoAttribution}>
               Fotoğraf: {species.photoAttribution}
             </p>
           )}

@@ -102,10 +102,12 @@ function getHostQueueKey(url: string): string {
     const host = new URL(url).hostname.toLowerCase();
     if (host.includes('inaturalist.org')) return 'inaturalist';
     if (host.includes('gbif.org')) return 'gbif';
+    if (host.includes('wikipedia.org') || host.includes('wikimedia.org')) return 'wikimedia';
     return host || 'default';
   } catch {
     if (url.includes('inaturalist.org')) return 'inaturalist';
     if (url.includes('gbif.org')) return 'gbif';
+    if (url.includes('wikipedia.org') || url.includes('wikimedia.org')) return 'wikimedia';
     return 'default';
   }
 }
@@ -114,9 +116,10 @@ function getOrCreateHostQueue(hostKey: string): HostQueueState {
   let state = HOST_QUEUES.get(hostKey);
   if (!state) {
     const isInat = hostKey === 'inaturalist';
+    const isWiki = hostKey === 'wikimedia';
     state = {
-      maxConcurrency: isInat ? 2 : 3,
-      minIntervalMs: isInat ? 160 : 70,
+      maxConcurrency: isInat ? 2 : isWiki ? 3 : 3,
+      minIntervalMs: isInat ? 160 : isWiki ? 80 : 70,
       activeCount: 0,
       lastStartedAt: 0,
       cooldownUntil: 0,
@@ -389,6 +392,7 @@ export interface CommonSpeciesEntry {
   englishName?: string;
   iucn?: string;
   category: string;
+  populationNote?: string;
   alternatives?: Array<{ scientificName: string; turkishName: string }>;
 }
 
@@ -800,8 +804,16 @@ const BILINGUAL_SPECIES_ENTRIES: Array<{
     entry: { scientificName: 'Hippopotamus amphibius', turkishName: 'Su Aygırı', englishName: 'Hippopotamus', iucn: 'VU', category: 'Memeliler' },
   },
   {
-    aliases: ['zebra'],
+    aliases: ['ova zebrası', 'bayağı zebra', 'plains zebra', 'common zebra'],
     entry: { scientificName: 'Equus quagga', turkishName: 'Ova Zebrası', englishName: 'Plains Zebra', iucn: 'NT', category: 'Memeliler' },
+  },
+  {
+    aliases: ['dağ zebrası', 'mountain zebra'],
+    entry: { scientificName: 'Equus zebra', turkishName: 'Dağ Zebrası', englishName: 'Mountain Zebra', iucn: 'VU', category: 'Memeliler' },
+  },
+  {
+    aliases: ['grevy zebrası', "grévy's zebra", "grevy's zebra", 'imperial zebra'],
+    entry: { scientificName: 'Equus grevyi', turkishName: 'Grevy Zebrası', englishName: "Grévy's Zebra", iucn: 'EN', category: 'Memeliler' },
   },
   {
     aliases: ['goril', 'gorilla'],
@@ -875,6 +887,42 @@ const BILINGUAL_SPECIES_ENTRIES: Array<{
     aliases: ['tavşan', 'yabani tavşan', 'hare', 'european hare'],
     entry: { scientificName: 'Lepus europaeus', turkishName: 'Bayağı Yabani Tavşan', englishName: 'European Hare', iucn: 'LC', category: 'Memeliler' },
   },
+  {
+    aliases: ['at', 'evcil at', 'horse', 'domestic horse'],
+    entry: { scientificName: 'Equus caballus', turkishName: 'At', englishName: 'Domestic Horse', category: 'Memeliler' },
+  },
+  {
+    aliases: ['eşek', 'evcil eşek', 'donkey'],
+    entry: {
+      scientificName: 'Equus asinus',
+      turkishName: 'Eşek',
+      englishName: 'Donkey',
+      category: 'Memeliler',
+      alternatives: [
+        { scientificName: 'Equus africanus', turkishName: 'Afrika Yaban Eşeği' },
+      ],
+    },
+  },
+  {
+    aliases: ['tibet atı', 'tibetan horse', 'tibetan pony', 'riwoche horse'],
+    entry: {
+      scientificName: 'Equus caballus',
+      turkishName: 'At (Tibet Atı Popülasyonu / Irkı)',
+      englishName: 'Domestic Horse (Tibetan Horse Breed)',
+      category: 'Memeliler',
+      populationNote:
+        'Not: "Tibet atı" ayrı bir biyolojik tür değildir; evcil at (Equus caballus) türüne ait yerel bir at ırkı veya popülasyonudur. Yabani tür olan Tibet yaban eşeği / Kiang (Equus kiang) ile karıştırılmamalıdır.',
+    },
+  },
+  {
+    aliases: ['tibet yaban eşeği', 'kiang', 'tibetan wild ass'],
+    entry: {
+      scientificName: 'Equus kiang',
+      turkishName: 'Tibet Yaban Eşeği (Kiang)',
+      englishName: 'Kiang (Tibetan Wild Ass)',
+      category: 'Memeliler',
+    },
+  },
 ];
 
 function normalizeSearchQuery(raw: string): string {
@@ -905,7 +953,7 @@ function foldTurkishChars(text: string): string {
 
 function stripCommonPlurals(lower: string): string[] {
   const candidates = [lower];
-  if (lower.length > 5 && (lower.endsWith('lar') || lower.endsWith('ler'))) {
+  if (lower.length >= 5 && (lower.endsWith('lar') || lower.endsWith('ler'))) {
     candidates.push(lower.slice(0, -3));
   }
   if (lower.length > 4 && lower.endsWith('s') && !lower.endsWith('us') && !lower.endsWith('is')) {
@@ -1742,11 +1790,22 @@ function scoreCommonNameMatch(candidateName: string | undefined, query: string):
   const candFold = foldTurkishChars(candidateName);
   const queryFold = foldTurkishChars(query);
 
+  if (!queryFold || queryFold.length < 2) return 0;
   if (candLower === queryLower || candFold === queryFold) return 100;
+
+  // Çok kısa (<= 2 harf) sorgularda alt-dize veya çok kelimeli ifade içi belirsiz eşleşmeleri asla kabul etme
+  if (queryFold.length <= 2) return 0;
 
   const escaped = queryFold.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const wordRegex = new RegExp(`(?:^|\\s|-)${escaped}(?:$|\\s|-)`, 'i');
-  if (wordRegex.test(candFold)) return 65;
+  if (wordRegex.test(candFold)) {
+    const candWords = candFold.split(/[\s,/-]+/).filter(Boolean);
+    if (candWords.length <= 1) return 85;
+    const lastWord = candWords[candWords.length - 1];
+    // Türkçe ve İngilizce tür adlarında ana tür kelimesi sondadır (ör. "Kızıl Tilki", "Red Fox"); baştaki niteleyici ("Eşek Arısı", "Zebra Kumru") tek başına eşleşme sayılmaz
+    if (lastWord === queryFold) return 65;
+    return 40;
+  }
 
   return 0;
 }
@@ -1808,6 +1867,7 @@ async function resolveCommonNameCandidates(query: string): Promise<{
   };
 
   // 1. iNaturalist adaylarını değerlendir (sadece Animalia iconic taxa + SPECIES)
+  const cleanFoldLen = foldTurkishChars(clean).length;
   const inatSources = [inatTrAuto, inatEnAuto, inatTrTaxa, inatEnTaxa];
   for (const src of inatSources) {
     if (src.status !== 'fulfilled' || !src.value.ok || !Array.isArray(src.value.data?.results)) continue;
@@ -1821,14 +1881,22 @@ async function resolveCommonNameCandidates(query: string): Promise<{
       const matchedTermIsNotSci =
         t.matched_term &&
         String(t.matched_term).toLowerCase() !== String(t.name).toLowerCase();
-      const matchedTermScore = matchedTermIsNotSci
+      const rawMatchedTermScore = matchedTermIsNotSci
         ? scoreCommonNameMatch(t.matched_term, clean)
         : 0;
+      const obsCount = typeof t.observations_count === 'number' ? t.observations_count : 0;
+
+      // API'nin yalnız matched_term alanını döndürmesi farklı dildeki/belirsiz eşleşmelerde tek başına yeterli sayılmaz
+      let matchedTermScore = 0;
+      if (prefScore > 0 || engScore > 0) {
+        matchedTermScore = rawMatchedTermScore;
+      } else if (cleanFoldLen >= 3 && rawMatchedTermScore >= 100 && obsCount >= 50) {
+        matchedTermScore = 68;
+      }
 
       const bestNameScore = Math.max(prefScore, engScore, matchedTermScore);
-      if (bestNameScore === 0) continue;
+      if (bestNameScore < 65) continue;
 
-      const obsCount = typeof t.observations_count === 'number' ? t.observations_count : 0;
       if (obsCount < 5 && bestNameScore < 100) continue;
 
       const obsBonus = Math.min(25, Math.log10(Math.max(1, obsCount)) * 4);
@@ -1850,10 +1918,13 @@ async function resolveCommonNameCandidates(query: string): Promise<{
       let matchedVern = '';
 
       for (const v of vernNames) {
-        if (!v?.vernacularName) continue;
+        if (!v?.vernacularName || v.vernacularName.length > 55) continue;
         const lang = String(v.language || '').toLowerCase();
-        if (lang && lang !== 'tur' && lang !== 'eng' && lang !== 'tr' && lang !== 'en') continue;
+        const isAllowedLang = lang === 'tur' || lang === 'eng' || lang === 'tr' || lang === 'en';
         const sc = scoreCommonNameMatch(v.vernacularName, clean);
+        if (!isAllowedLang) {
+          if (lang || cleanFoldLen < 4 || sc < 100) continue;
+        }
         if (sc > bestVernScore) {
           bestVernScore = sc;
           matchedVern = v.vernacularName;
@@ -1924,6 +1995,7 @@ export async function matchSpecies(query: string): Promise<SpeciesInfo> {
     let predefinedTurkishName = directCommonEntry?.turkishName || '';
     let predefinedEnglishName = directCommonEntry?.englishName || '';
     let predefinedIucn: string | undefined = directCommonEntry?.iucn;
+    let predefinedPopulationNote: string | undefined = directCommonEntry?.populationNote;
     let iucnSource = 'Resmi IUCN değerlendirme kaydı bulunamadı (NE)';
     let iucnVerified = false;
     let ambiguityAlternatives: Array<{ scientificName: string; turkishName: string }> = directCommonEntry?.alternatives || [];
@@ -1993,6 +2065,7 @@ export async function matchSpecies(query: string): Promise<SpeciesInfo> {
             predefinedTurkishName = chosenEntry.turkishName || '';
             predefinedEnglishName = chosenEntry.englishName || '';
             predefinedIucn = chosenEntry.iucn;
+            predefinedPopulationNote = chosenEntry.populationNote;
             ambiguityAlternatives = chosenEntry.alternatives || [];
             if (predefinedIucn) {
               iucnSource = 'IUCN Kırmızı Liste / Canlı Atlası Referans Envanteri';
@@ -2105,10 +2178,10 @@ export async function matchSpecies(query: string): Promise<SpeciesInfo> {
         }
       }
 
-      // iNaturalist üzerinden fotoğraf, Türkçe/İngilizce ad ve özet desteği (birebir bilimsel ad eşleşmesi ile; eşzamanlı istekler tekilleştirilir)
+      // iNaturalist üzerinden fotoğraf, Türkçe/İngilizce ad ve özet desteği (eksik fotoğrafta Wikipedia/Wikimedia & GBIF StillImage fallback ile; eşzamanlı istekler tekilleştirilir)
       const inatOutcome = await runDedupedInFlight(
-        `match-inat:v2:${canonicalName.toLowerCase()}`,
-        () => fetchInatTaxon(canonicalName)
+        `match-inat:v3:${canonicalName.toLowerCase()}`,
+        () => fetchInatTaxon(canonicalName, { includeSummary: true, usageKey: resolvedData.usageKey })
       );
       const inatInfo = inatOutcome.status === 'FOUND' ? inatOutcome.data : null;
 
@@ -2132,6 +2205,9 @@ export async function matchSpecies(query: string): Promise<SpeciesInfo> {
       }
 
       let summaryText = inatInfo?.summary || '';
+      if (predefinedPopulationNote) {
+        summaryText = summaryText ? `${summaryText} ${predefinedPopulationNote}` : predefinedPopulationNote;
+      }
       if (ambiguityAlternatives.length > 0) {
         const altText = ambiguityAlternatives
           .map(a => `${a.turkishName} (${a.scientificName})`)
@@ -2160,6 +2236,7 @@ export async function matchSpecies(query: string): Promise<SpeciesInfo> {
         isMatched: true,
         photoUrl: inatInfo?.photoUrl,
         photoAttribution: inatInfo?.photoAttribution,
+        photoSource: inatInfo?.photoSource,
         iucnStatus: finalIucn,
         iucnCategoryName: finalIucnCategory,
         iucnSource,
@@ -2200,10 +2277,12 @@ export interface InatTaxonMetadata {
   englishName?: string;
   photoUrl?: string;
   photoAttribution?: string;
+  photoSource?: string;
   iucnStatus?: string;
   iucnCategoryName?: string;
   summary?: string;
   inatUrl?: string;
+  fallbackCheckedWithKey?: number;
 }
 
 export type InatTaxonFetchOutcome =
@@ -2213,11 +2292,437 @@ export type InatTaxonFetchOutcome =
 
 export interface FetchInatTaxonOptions {
   includeSummary?: boolean;
+  usageKey?: number;
+  skipFallbackPhoto?: boolean;
+}
+
+function formatShortLicenseLabel(rawLicense?: string): string {
+  if (!rawLicense) return '';
+  const lower = rawLicense.toLowerCase();
+  if (lower.includes('publicdomain/zero') || lower.includes('cc0')) return 'CC0';
+  if (lower.includes('publicdomain/mark') || lower === 'pd') return 'Public Domain';
+  const ccMatch = lower.match(/creativecommons\.org\/licenses\/([^/]+)\/([^/]+)/);
+  if (ccMatch) return `CC ${ccMatch[1].toUpperCase()} ${ccMatch[2]}`;
+  return rawLicense.length <= 28 ? rawLicense : '';
+}
+
+function isUsableImageThumbnailUrl(url: string | undefined): url is string {
+  if (!url || typeof url !== 'string') return false;
+  if (!url.startsWith('https://')) return false;
+  if (/\.(svg|pdf|html|htm|cfm)(?:$|\?)/i.test(url)) return false;
+  if (/\/(?:range|distribution|status_iucn|red_list|cladogram|phylogeny|commons-logo|flag_of|question_book|ambox|disambig)/i.test(url)) {
+    return false;
+  }
+  if (/image_details\.cfm/i.test(url)) return false;
+  return true;
+}
+
+function extractCommonsFilenameFromUrl(url: string): string | null {
+  try {
+    const pathname = decodeURIComponent(new URL(url).pathname);
+    const thumbMatch = pathname.match(/\/thumb\/[^/]+\/[^/]+\/([^/]+)\/[^/]+$/);
+    if (thumbMatch?.[1]) return thumbMatch[1];
+    const directMatch = pathname.match(/\/commons\/[^/]+\/[^/]+\/([^/]+)$/);
+    if (directMatch?.[1]) return directMatch[1];
+  } catch {
+    // ignore URL parse error
+  }
+  return null;
+}
+
+export interface ImageAssetVerificationResult {
+  verified: boolean;
+  status: number;
+  contentType: string | null;
+  magicType: string | null;
+  corsOpaque?: boolean;
+  reason?: string;
+}
+
+function detectImageMagicBytes(bytes: Uint8Array): string | null {
+  if (bytes.length < 4) return null;
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'image/gif';
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+  return null;
+}
+
+function looksLikeTextOrHtmlPrefix(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) return false;
+  const sample = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, 64)).trimStart().toLowerCase();
+  return sample.startsWith('<!doctype') || sample.startsWith('<html') || sample.startsWith('<xml') || sample.startsWith('<?xml') || sample.startsWith('{');
+}
+
+/**
+ * Görsel URL'sinin yalnızca HTTP 200 değil, gerçekten image/* Content-Type ve gerçek görsel baytları döndürdüğünü doğrular.
+ * HTML/404 yanıtlarını reddeder; tarayıcıda CORS-opak img sunucuları için ağ hatasında zarif geri dönüş uygular.
+ */
+export async function verifyImageAssetUrl(
+  url: string | undefined,
+  timeoutMs = 4500
+): Promise<ImageAssetVerificationResult> {
+  if (!isUsableImageThumbnailUrl(url)) {
+    return { verified: false, status: 0, contentType: null, magicType: null, reason: 'INVALID_IMAGE_URL' };
+  }
+
+  const cacheKey = `img-verify:v1:${url}`;
+  const cached = getCached<ImageAssetVerificationResult>(cacheKey);
+  if (cached) return cached;
+
+  return runDedupedInFlight(`in-flight:${cacheKey}`, async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      // Tarayıcı ortamında doğrudan üçüncü parti görsel CDN'lerine CORS fetch gönderme;
+      // doğrulamayı aynı kök (same-origin) sunucu uç noktası üzerinden yap.
+      if (typeof window !== 'undefined') {
+        const res = await fetch(`/api/media/verify?url=${encodeURIComponent(url)}`, {
+          method: 'GET',
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          const unavailable: ImageAssetVerificationResult = {
+            verified: false,
+            status: res.status,
+            contentType: null,
+            magicType: null,
+            reason: `SERVER_VERIFY_HTTP_${res.status}`,
+          };
+          return unavailable;
+        }
+        const data = (await res.json()) as ImageAssetVerificationResult;
+        const normalized: ImageAssetVerificationResult = {
+          verified: Boolean(data?.verified),
+          status: typeof data?.status === 'number' ? data.status : 0,
+          contentType: data?.contentType ?? null,
+          magicType: data?.magicType ?? null,
+          reason: data?.reason,
+        };
+        setCached(cacheKey, normalized, normalized.verified ? 30 * 60 * 1000 : 5 * 60 * 1000);
+        return normalized;
+      }
+
+      const res = await fetch(url, { method: 'GET', signal: controller.signal });
+      const contentType = res.headers.get('content-type');
+      const ctLower = (contentType || '').toLowerCase();
+
+      if (!res.ok) {
+        try { await res.body?.cancel(); } catch { /* ignore */ }
+        const failed: ImageAssetVerificationResult = {
+          verified: false,
+          status: res.status,
+          contentType,
+          magicType: null,
+          reason: `HTTP_${res.status}`,
+        };
+        setCached(cacheKey, failed, 5 * 60 * 1000);
+        return failed;
+      }
+
+      if (ctLower && !ctLower.startsWith('image/')) {
+        try { await res.body?.cancel(); } catch { /* ignore */ }
+        const nonImg: ImageAssetVerificationResult = {
+          verified: false,
+          status: res.status,
+          contentType,
+          magicType: null,
+          reason: 'NON_IMAGE_CONTENT_TYPE',
+        };
+        setCached(cacheKey, nonImg, 10 * 60 * 1000);
+        return nonImg;
+      }
+
+      let headBytes = new Uint8Array(0);
+      if (res.body && typeof res.body.getReader === 'function') {
+        const reader = res.body.getReader();
+        try {
+          const chunks: Uint8Array[] = [];
+          let total = 0;
+          while (total < 32) {
+            const { done, value } = await reader.read();
+            if (done || !value) break;
+            chunks.push(value);
+            total += value.length;
+          }
+          const combined = new Uint8Array(Math.min(total, 64));
+          let offset = 0;
+          for (const ch of chunks) {
+            const take = Math.min(ch.length, combined.length - offset);
+            combined.set(ch.subarray(0, take), offset);
+            offset += take;
+            if (offset >= combined.length) break;
+          }
+          headBytes = combined;
+        } finally {
+          try { await reader.cancel(); } catch { /* ignore */ }
+        }
+      }
+
+      const magicType = detectImageMagicBytes(headBytes);
+      if (headBytes.length > 0 && (looksLikeTextOrHtmlPrefix(headBytes) || (!magicType && !ctLower.startsWith('image/')))) {
+        const invalidBytes: ImageAssetVerificationResult = {
+          verified: false,
+          status: res.status,
+          contentType,
+          magicType,
+          reason: 'HTML_OR_NON_IMAGE_BYTES',
+        };
+        setCached(cacheKey, invalidBytes, 10 * 60 * 1000);
+        return invalidBytes;
+      }
+
+      if (headBytes.length >= 4 && !magicType) {
+        const badMagic: ImageAssetVerificationResult = {
+          verified: false,
+          status: res.status,
+          contentType,
+          magicType: null,
+          reason: 'UNRECOGNIZED_IMAGE_MAGIC',
+        };
+        setCached(cacheKey, badMagic, 10 * 60 * 1000);
+        return badMagic;
+      }
+
+      const okRes: ImageAssetVerificationResult = {
+        verified: true,
+        status: res.status,
+        contentType,
+        magicType: magicType || (ctLower.startsWith('image/') ? ctLower.split(';')[0].trim() : null),
+      };
+      setCached(cacheKey, okRes, 30 * 60 * 1000);
+      return okRes;
+    } catch {
+      return {
+        verified: false,
+        status: 0,
+        contentType: null,
+        magicType: null,
+        reason: typeof window !== 'undefined' ? 'SERVER_VERIFY_ERROR' : 'FETCH_ERROR',
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+}
+
+export async function verifyImageAssetUrlsBatch(
+  urls: string[],
+  timeoutMs = 7000
+): Promise<Map<string, ImageAssetVerificationResult>> {
+  const resultMap = new Map<string, ImageAssetVerificationResult>();
+  const pendingUrls: string[] = [];
+
+  for (const raw of urls) {
+    if (!isUsableImageThumbnailUrl(raw)) {
+      if (raw) {
+        resultMap.set(raw, { verified: false, status: 0, contentType: null, magicType: null, reason: 'INVALID_IMAGE_URL' });
+      }
+      continue;
+    }
+    const cached = getCached<ImageAssetVerificationResult>(`img-verify:v1:${raw}`);
+    if (cached) {
+      resultMap.set(raw, cached);
+    } else if (!pendingUrls.includes(raw)) {
+      pendingUrls.push(raw);
+    }
+  }
+
+  if (pendingUrls.length === 0) return resultMap;
+
+  if (typeof window !== 'undefined') {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch('/api/media/verify-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls: pendingUrls }),
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        const payload = await res.json();
+        const serverResults: Record<string, ImageAssetVerificationResult> = payload?.results || {};
+        for (const u of pendingUrls) {
+          const itemRes = serverResults[u] || {
+            verified: false,
+            status: 0,
+            contentType: null,
+            magicType: null,
+            reason: 'SERVER_VERIFY_MISSING',
+          };
+          setCached(`img-verify:v1:${u}`, itemRes, itemRes.verified ? 30 * 60 * 1000 : 5 * 60 * 1000);
+          resultMap.set(u, itemRes);
+        }
+        return resultMap;
+      }
+    } catch {
+      // Sunucu toplu doğrulama erişilemezse tekil hata ile kapat (doğrulanmamış kabul etme)
+    } finally {
+      clearTimeout(timer);
+    }
+    for (const u of pendingUrls) {
+      resultMap.set(u, { verified: false, status: 0, contentType: null, magicType: null, reason: 'SERVER_VERIFY_ERROR' });
+    }
+    return resultMap;
+  }
+
+  await runWithConcurrencyLimit(pendingUrls, 4, async (u) => {
+    const r = await verifyImageAssetUrl(u, 4000);
+    resultMap.set(u, r);
+    return r;
+  });
+  return resultMap;
+}
+
+/**
+ * iNaturalist'te görseli olmayan türler için bilimsel ad doğrulamalı açık veri yedek görsel çözümleyici:
+ * 1) Wikipedia MediaWiki Query API (HTTP 200 güvenli, 404 üretmez) + Wikimedia Commons
+ * 2) GBIF Occurrence Media (StillImage, canlı gözlem öncelikli tek sorgu, exact speciesKey doğrulamalı + gerçek image/MIME kontrolü)
+ */
+async function fetchVerifiedFallbackPhoto(
+  scientificName: string,
+  usageKey?: number
+): Promise<{ photoUrl: string; photoAttribution: string; photoSource: string } | null> {
+  const cleanSci = normalizeSearchQuery(scientificName);
+  if (!cleanSci) return null;
+  const sciLower = cleanSci.toLowerCase();
+  const sciWords = sciLower.split(' ').filter(Boolean);
+  const genusLower = sciWords[0] || '';
+  const speciesLower = sciWords[1] || '';
+
+  const cacheKey = `fallback-photo:v3:${sciLower}:${usageKey || 0}`;
+  const cached = getCached<{ photoUrl: string; photoAttribution: string; photoSource: string } | null>(cacheKey);
+  if (cached !== null) return cached;
+
+  return runDedupedInFlight(`in-flight:${cacheKey}`, async () => {
+    // 1. Wikipedia MediaWiki action=query (sayfa yoksa da HTTP 200 döner; 404 gürültüsü üretmez)
+    try {
+      const slug = cleanSci.replace(/\s+/g, '_');
+      const wikiRes = await fetchSafeJson<any>(
+        `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(slug)}&prop=pageimages|extracts|pageterms&exintro=1&explaintext=1&exchars=400&piprop=thumbnail&pithumbsize=500&redirects=1&format=json&origin=*`,
+        'Wikipedia Query API',
+        0,
+        4500
+      );
+      const pagesObj = wikiRes.ok ? wikiRes.data?.query?.pages : null;
+      const firstPage: any = pagesObj ? Object.values(pagesObj)[0] : null;
+      if (firstPage && firstPage.missing === undefined && firstPage.invalid === undefined) {
+        const thumb: string | undefined = firstPage.thumbnail?.source;
+        if (isUsableImageThumbnailUrl(thumb)) {
+          const titleLower = String(firstPage.title || '').toLowerCase();
+          const extractLower = String(firstPage.extract || '').toLowerCase();
+          const descLower = Array.isArray(firstPage.terms?.description)
+            ? String(firstPage.terms.description[0] || '').toLowerCase()
+            : '';
+
+          const hasExactTitle = titleLower === sciLower;
+          const hasBinomialInText = extractLower.includes(sciLower) || descLower.includes(sciLower);
+          const isBioTaxonPage =
+            /(?:species|subspecies|genus|animal|mammal|bird|reptile|amphibian|fish|insect|spider|arachnid|mollusc|cephalopod|octopus|crustacean|echinoderm|annelid|butterfly|moth|beetle|ant|wasp|bee|snake|lizard|frog|toad|turtle|shark)/i.test(descLower) ||
+            /(?:is a species|is a subspecies)/i.test(extractLower);
+          const hasSpeciesInGenusPage =
+            Boolean(genusLower && speciesLower) &&
+            extractLower.includes(genusLower) &&
+            extractLower.includes(speciesLower) &&
+            isBioTaxonPage;
+
+          if (hasExactTitle || hasBinomialInText || hasSpeciesInGenusPage) {
+            const imgCheck = await verifyImageAssetUrl(thumb, 4000);
+            if (imgCheck.verified) {
+              let attribution = `Wikimedia Commons / Wikipedia (${firstPage.title || cleanSci})`;
+              const commonsFile = extractCommonsFilenameFromUrl(thumb);
+              if (commonsFile) {
+                try {
+                  const cmRes = await fetchSafeJson<any>(
+                    `https://commons.wikimedia.org/w/api.php?action=query&titles=${encodeURIComponent(`File:${commonsFile}`)}&prop=imageinfo&iiprop=extmetadata&format=json&origin=*`,
+                    'Wikimedia Commons Metadata API',
+                    0,
+                    3000
+                  );
+                  const pages = cmRes.ok && cmRes.data?.query?.pages ? Object.values(cmRes.data.query.pages) : [];
+                  const meta = (pages[0] as any)?.imageinfo?.[0]?.extmetadata;
+                  const rawArtist = String(meta?.Artist?.value || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+                  const licenseShort = String(meta?.LicenseShortName?.value || '').trim();
+                  const shortArtist = rawArtist.length > 48 ? `${rawArtist.slice(0, 45)}...` : rawArtist;
+                  if (shortArtist && licenseShort) {
+                    attribution = `${shortArtist} · ${licenseShort} (Wikimedia Commons)`;
+                  } else if (licenseShort) {
+                    attribution = `${licenseShort} · Wikimedia Commons (${firstPage.title || cleanSci})`;
+                  }
+                } catch {
+                  // Commons meta opsiyoneldir
+                }
+              }
+              const out = { photoUrl: thumb, photoAttribution: attribution, photoSource: 'Wikimedia Commons' };
+              setCached(cacheKey, out, 30 * 60 * 1000);
+              return out;
+            }
+          }
+        }
+      }
+    } catch {
+      // Wikipedia fallback başarısızsa GBIF Media'ya geç
+    }
+
+    // 2. GBIF Occurrence StillImage (tek birleştirilmiş sorgu — 429 yükünü azaltır, canlı gözlem öncelikli sıralar)
+    if (usageKey && Number.isFinite(usageKey)) {
+      const url = `https://api.gbif.org/v1/occurrence/search?speciesKey=${usageKey}&mediaType=StillImage&limit=8`;
+      const preferredOrder = ['HUMAN_OBSERVATION', 'OBSERVATION', 'MACHINE_OBSERVATION', 'LIVING_SPECIMEN', 'PRESERVED_SPECIMEN'];
+
+      try {
+        const occRes = await fetchSafeJson<{ results?: any[] }>(url, 'GBIF Occurrence Media API', 0, 5000);
+        if (occRes.ok && Array.isArray(occRes.data?.results) && occRes.data.results.length > 0) {
+          const sortedResults = [...occRes.data.results].sort((a, b) => {
+            const ia = preferredOrder.indexOf(String(a?.basisOfRecord || ''));
+            const ib = preferredOrder.indexOf(String(b?.basisOfRecord || ''));
+            return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+          });
+
+          for (const occ of sortedResults) {
+            if (!occ) continue;
+            const occSpeciesKey = occ.speciesKey || occ.acceptedTaxonKey || occ.taxonKey;
+            if (occSpeciesKey && Number(occSpeciesKey) !== Number(usageKey)) continue;
+            if (!Array.isArray(occ.media)) continue;
+
+            for (const m of occ.media) {
+              if (!m || m.type !== 'StillImage' || !isUsableImageThumbnailUrl(m.identifier)) continue;
+              const fmt = String(m.format || '').toLowerCase();
+              const looksLikeImgUrl = /\.(jpe?g|png|webp)(?:$|\?)/i.test(m.identifier) || m.identifier.includes('/media/?');
+              if (fmt && !fmt.startsWith('image/')) continue;
+              if (!fmt && !looksLikeImgUrl) continue;
+
+              const imgCheck = await verifyImageAssetUrl(m.identifier, 4000);
+              if (!imgCheck.verified) continue;
+
+              const holder = m.rightsHolder || m.creator || occ.recordedBy || occ.institutionCode || 'GBIF Occurrence';
+              const lic = formatShortLicenseLabel(m.license || occ.license);
+              const attribution = lic ? `${holder} · ${lic} (GBIF)` : `${holder} (GBIF)`;
+              const out = { photoUrl: m.identifier, photoAttribution: attribution, photoSource: 'GBIF Media' };
+              setCached(cacheKey, out, 30 * 60 * 1000);
+              return out;
+            }
+          }
+        }
+      } catch {
+        // GBIF media isteği başarısızsa null döndür
+      }
+    }
+
+    return null;
+  });
 }
 
 /**
  * iNaturalist API'den fotoğraf, Türkçe/İngilizce isim ve özet çekme
  * (results[0] körü körüne alınmaz; bilimsel ad ve species rank eşleşmesi esas alınır;
+ * iNaturalist'te fotoğraf eksikse Wikipedia/Wikimedia & GBIF StillImage ile doğrulanmış yedek görsel çözümlenir;
  * gerçek bulunamama durumu ile HTTP/XML/ağ hataları net biçimde ayrıştırılır)
  */
 export async function fetchInatTaxon(
@@ -2228,16 +2733,26 @@ export async function fetchInatTaxon(
   if (!cleanSci) return { status: 'NOT_FOUND' };
 
   const includeSummary = options.includeSummary ?? true;
-  const cacheKey = `inat-taxon:v2:${cleanSci}`;
+  const skipFallbackPhoto = options.skipFallbackPhoto ?? false;
+  const usageKey = options.usageKey;
+  const cacheKey = `inat-taxon:v3:${cleanSci}`;
+  const notFoundKey = `inat-taxon-nf:v3:${cleanSci}:${skipFallbackPhoto ? 0 : (usageKey || 0)}`;
   const cachedOutcome = getCached<InatTaxonFetchOutcome>(cacheKey);
   if (cachedOutcome) {
-    if (cachedOutcome.status === 'NOT_FOUND') return cachedOutcome;
-    if (cachedOutcome.status === 'FOUND' && (!includeSummary || cachedOutcome.data.summary !== undefined)) {
+    if (
+      cachedOutcome.status === 'FOUND' &&
+      (!includeSummary || cachedOutcome.data.summary !== undefined) &&
+      (Boolean(cachedOutcome.data.photoUrl) || skipFallbackPhoto || !usageKey || cachedOutcome.data.fallbackCheckedWithKey === usageKey)
+    ) {
       return cachedOutcome;
     }
   }
+  const cachedNotFound = getCached<InatTaxonFetchOutcome>(notFoundKey);
+  if (cachedNotFound && cachedNotFound.status === 'NOT_FOUND') {
+    return cachedNotFound;
+  }
 
-  return runDedupedInFlight(`in-flight:inat:${cleanSci}:${includeSummary ? 'full' : 'lite'}`, async () => {
+  return runDedupedInFlight(`in-flight:inat:${cleanSci}:${includeSummary ? 'full' : 'lite'}:${skipFallbackPhoto ? 'nofb' : (usageKey || 0)}`, async () => {
     const findExactMatch = (results: any[]) => {
       const exactSpecies = results.find(
         (t: any) =>
@@ -2316,8 +2831,28 @@ export async function fetchInatTaxon(
       }
 
       if (!exactAny) {
+        if (skipFallbackPhoto) {
+          const notFoundFast: InatTaxonFetchOutcome = { status: 'NOT_FOUND' };
+          setCached(notFoundKey, notFoundFast, 10 * 60 * 1000);
+          return notFoundFast;
+        }
+        const fallbackPhoto = await fetchVerifiedFallbackPhoto(scientificName, usageKey);
+        if (fallbackPhoto) {
+          const fallbackFound: InatTaxonFetchOutcome = {
+            status: 'FOUND',
+            data: {
+              photoUrl: fallbackPhoto.photoUrl,
+              photoAttribution: fallbackPhoto.photoAttribution,
+              photoSource: fallbackPhoto.photoSource,
+              summary: includeSummary ? '' : undefined,
+              fallbackCheckedWithKey: usageKey,
+            },
+          };
+          setCached(cacheKey, fallbackFound, 30 * 60 * 1000);
+          return fallbackFound;
+        }
         const notFound: InatTaxonFetchOutcome = { status: 'NOT_FOUND' };
-        setCached(cacheKey, notFound, 10 * 60 * 1000);
+        setCached(notFoundKey, notFound, 10 * 60 * 1000);
         return notFound;
       }
 
@@ -2350,17 +2885,42 @@ export async function fetchInatTaxon(
         iucnLabel = taxon.conservation_status.status_name || getIucnLabel(iucnCode);
       }
 
+      let photoUrl: string | undefined = taxon.default_photo?.medium_url || taxon.default_photo?.url;
+      let photoAttribution: string | undefined = taxon.default_photo?.attribution;
+      let photoSource: string | undefined = photoUrl ? 'iNaturalist' : undefined;
+
+      if (photoUrl && (!isUsableImageThumbnailUrl(photoUrl) || (!skipFallbackPhoto && !(await verifyImageAssetUrl(photoUrl, 3500)).verified))) {
+        photoUrl = undefined;
+        photoAttribution = undefined;
+        photoSource = undefined;
+      }
+
+      if (!photoUrl && !skipFallbackPhoto) {
+        const fallbackPhoto = await fetchVerifiedFallbackPhoto(scientificName, usageKey);
+        if (fallbackPhoto) {
+          photoUrl = fallbackPhoto.photoUrl;
+          photoAttribution = fallbackPhoto.photoAttribution;
+          photoSource = fallbackPhoto.photoSource;
+        }
+      }
+
+      const preservedTurkishName =
+        taxon.preferred_common_name ||
+        (cachedOutcome?.status === 'FOUND' ? cachedOutcome.data.turkishName : undefined);
+
       const found: InatTaxonFetchOutcome = {
         status: 'FOUND',
         data: {
-          turkishName: taxon.preferred_common_name,
+          turkishName: preservedTurkishName,
           englishName: englishCommonName,
-          photoUrl: taxon.default_photo?.medium_url || taxon.default_photo?.url,
-          photoAttribution: taxon.default_photo?.attribution,
+          photoUrl,
+          photoAttribution,
+          photoSource,
           iucnStatus: iucnCode,
           iucnCategoryName: iucnLabel,
           summary: taxon.wikipedia_summary,
           inatUrl: `https://www.inaturalist.org/taxa/${taxon.id}`,
+          fallbackCheckedWithKey: skipFallbackPhoto ? undefined : usageKey,
         },
       };
 
@@ -2470,7 +3030,13 @@ export async function fetchSpeciesAnalysis(
   const fetchExtraPages = options.fetchExtraPages ?? true;
   const currentYear = new Date().getFullYear();
 
-  const cacheKey = `analysis:v3:${toTrLower(scientificName)}:${countryCode}:${startYear || ''}:${endYear || ''}:${limit}`;
+  const preferredCommonClean = options.preferredTurkishName?.trim();
+  const variantKeyParts = [
+    options.preMatchedSpecies?.turkishName ? toTrLower(options.preMatchedSpecies.turkishName) : '',
+    preferredCommonClean ? toTrLower(preferredCommonClean) : '',
+  ].filter(Boolean);
+  const variantKey = variantKeyParts.length > 0 ? `:${variantKeyParts.join('::')}` : '';
+  const cacheKey = `analysis:v3:${toTrLower(scientificName)}:${countryCode}:${startYear || ''}:${endYear || ''}:${limit}${variantKey}`;
   const cachedAnalysis = getCached<SpeciesAnalysis>(cacheKey);
   if (cachedAnalysis) return cachedAnalysis;
 
@@ -2479,7 +3045,27 @@ export async function fetchSpeciesAnalysis(
     if (cachedInside) return cachedInside;
 
   // 1. Türün taksonomik kimlik ve GBIF Backbone usageKey bilgilerini çöz
-  const species = await matchSpecies(scientificName);
+  const baseSpecies =
+    options.preMatchedSpecies?.isMatched && options.preMatchedSpecies?.usageKey
+      ? { ...options.preMatchedSpecies }
+      : { ...(await matchSpecies(scientificName)) };
+
+  // Keşif kartından gelen doğrulanmış Türkçe ortak adı koru (bilimsel ada veya boşluğa düşmesini engelle)
+  const species: SpeciesInfo = (() => {
+    if (!preferredCommonClean) return baseSpecies;
+    const currentTrLower = (baseSpecies.turkishName || '').trim().toLowerCase();
+    const canonicalLower = (baseSpecies.canonicalName || '').trim().toLowerCase();
+    const sciLower = (baseSpecies.scientificName || '').trim().toLowerCase();
+    const prefLower = preferredCommonClean.toLowerCase();
+    if (
+      prefLower !== canonicalLower &&
+      prefLower !== sciLower &&
+      (!currentTrLower || currentTrLower === canonicalLower || currentTrLower === sciLower)
+    ) {
+      return { ...baseSpecies, turkishName: preferredCommonClean };
+    }
+    return baseSpecies;
+  })();
 
   // Taksonomi doğrulama geçici ağ/API hatasıyla sonuçlandıysa bunu "0 gözlem" gibi önbelleğe alma
   if (species.matchType === 'ERROR') {
@@ -4317,6 +4903,70 @@ export const TAXONOMIC_GROUP_PROFILES: TaxonGroupProfile[] = [
       },
     ],
   },
+  {
+    id: 'zebra',
+    displayName: 'Zebra Türleri (Equus)',
+    aliases: ['zebra', 'zebralar', 'zebra türleri', 'zebras'],
+    subgroups: [
+      {
+        id: 'zebra-tumu',
+        label: 'Tüm Zebra Türleri (Ova, Dağ & Grevy Zebraları)',
+        description: 'Yaşayan üç biyolojik zebra türünü birlikte keşfedin: Ova zebrası (Equus quagga), Dağ zebrası (Equus zebra) ve Grevy zebrası (Equus grevyi).',
+        members: [
+          { scientificName: 'Equus', expectedRank: 'GENUS', expectedClass: 'Mammalia' },
+        ],
+        allowedCanonicalNames: ['Equus quagga', 'Equus zebra', 'Equus grevyi'],
+        genusBiologicalLabels: {
+          equus: 'Zebra Türü (Equus — Equidae)',
+        },
+        membershipPolicyNote: 'Yalnızca yaşayan üç biyolojik zebra türü (Equus quagga, Equus zebra ve Equus grevyi) listelenir; at (Equus caballus) ve eşek (Equus asinus) türleri kapsam dışıdır.',
+      },
+      {
+        id: 'zebra-ova',
+        label: 'Ova Zebrası (Equus quagga)',
+        description: 'Doğu ve Güney Afrika savanlarında yaşayan Bayağı / Ova Zebrası (Equus quagga).',
+        members: [{ scientificName: 'Equus', expectedRank: 'GENUS', expectedClass: 'Mammalia' }],
+        allowedCanonicalNames: ['Equus quagga'],
+        genusBiologicalLabels: { equus: 'Ova Zebrası (Equus quagga)' },
+      },
+      {
+        id: 'zebra-dag',
+        label: 'Dağ Zebrası (Equus zebra)',
+        description: 'Güneybatı Afrika dağlık ve kayalık alanlarına özgü Dağ Zebrası (Equus zebra).',
+        members: [{ scientificName: 'Equus', expectedRank: 'GENUS', expectedClass: 'Mammalia' }],
+        allowedCanonicalNames: ['Equus zebra'],
+        genusBiologicalLabels: { equus: 'Dağ Zebrası (Equus zebra)' },
+      },
+      {
+        id: 'zebra-grevy',
+        label: 'Grevy Zebrası (Equus grevyi)',
+        description: 'Kenya ve Etiyopya yarı kurak savanlarında yaşayan, tehlike altındaki en iri zebra türü (Equus grevyi).',
+        members: [{ scientificName: 'Equus', expectedRank: 'GENUS', expectedClass: 'Mammalia' }],
+        allowedCanonicalNames: ['Equus grevyi'],
+        genusBiologicalLabels: { equus: 'Grevy Zebrası (Equus grevyi)' },
+      },
+    ],
+  },
+  {
+    id: 'at-sinegi',
+    displayName: 'At Sineği Türleri (Tabanidae)',
+    aliases: ['at sineği', 'at sinekleri', 'at sineği türleri', 'horsefly', 'horseflies', 'horse fly', 'horse flies', 'tabanidae'],
+    subgroups: [
+      {
+        id: 'at-sinegi-tabanus',
+        label: 'Gerçek At Sinekleri (Tabanus Cinsi)',
+        description: 'Sığır ve at sineği olarak bilinen Tabanus cinsine ait gerçek at sineği türleri.',
+        members: [{ scientificName: 'Tabanus', expectedRank: 'GENUS', expectedClass: 'Insecta' }],
+        genusBiologicalLabels: { tabanus: 'Gerçek At Sineği (Tabanus — Tabanidae)' },
+      },
+      {
+        id: 'at-sinegi-tumu',
+        label: 'Tüm At Sineğigiller (Tabanidae Familyası)',
+        description: 'Tabanus, Chrysops ve Haematopota dahil tüm Tabanidae at/geyik sineği türleri.',
+        members: [{ scientificName: 'Tabanidae', expectedRank: 'FAMILY', expectedClass: 'Insecta' }],
+      },
+    ],
+  },
 ];
 
 const GROUP_PROFILE_INDEX = (() => {
@@ -4827,6 +5477,8 @@ const GENERAL_GROUP_PRIORITY_ALIASES = new Set(
     'deniz kestanesi', 'deniz kestaneleri', 'sea urchin', 'sea urchins',
     'sülük', 'sülükler', 'leech', 'leeches',
     'peygamberdevesi', 'peygamberdeveleri', 'mantis', 'praying mantis',
+    'zebra', 'zebralar', 'zebras',
+    'at sineği', 'at sinekleri', 'horsefly', 'horseflies', 'horse fly', 'horse flies',
   ].map(s => foldTurkishChars(s))
 );
 
@@ -5440,6 +6092,9 @@ function scoreHigherTaxonCommonMatch(candidateName: string | undefined, query: s
   if (!queryFold || queryFold.length < 2) return 0;
   if (candLower === queryLower || candFold === queryFold) return 100;
 
+  // 2 harfli çok kısa sorgularda "-giller" / çok kelimeli başlık genişletmesi yapma (ör. "at" -> "Atgiller" / "At Sinekleri" önlenir)
+  if (queryFold.length <= 2) return 0;
+
   const queryForms = Array.from(new Set(stripCommonPlurals(queryFold)));
   const stemPatterns = queryForms.map(f => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   const combinedStem = `(?:${stemPatterns.join('|')})`;
@@ -5447,7 +6102,7 @@ function scoreHigherTaxonCommonMatch(candidateName: string | undefined, query: s
   const pluralRegex = new RegExp(`^${combinedStem}(?:lar|ler|giller|lari|leri|s|es)?$`, 'i');
   if (pluralRegex.test(candFold)) return 96;
 
-  // "Kelebekler ve Güveler", "Yusufçuklar ve Kızböcekleri" gibi çoklu başlıklar
+  // "Kelebekler ve Güveler", "Yusufçuklar ve Kızböcekleri" gibi çoklu başlıklar (yalnızca ilk kelime gerçek bağlaç başlığıysa)
   const headPluralRegex = new RegExp(`(?:^|\\s|,)\\s*${combinedStem}(?:lar|ler|giller|lari|leri|s|es)?(?:$|\\s|,)`, 'i');
   if (headPluralRegex.test(candFold)) {
     const candWordsEarly = candFold.split(/[\s,/-]+/).filter(Boolean);
@@ -5455,7 +6110,7 @@ function scoreHigherTaxonCommonMatch(candidateName: string | undefined, query: s
       candWordsEarly.length >= 3 &&
       (candWordsEarly[1] === 've' || candWordsEarly[1] === '&') &&
       pluralRegex.test(candWordsEarly[0]);
-    if (isExactConjunctionHead || candWordsEarly.length <= 2) return 92;
+    if (isExactConjunctionHead) return 92;
   }
 
   const baseScore = Math.max(...queryForms.map(f => scoreCommonNameMatch(candidateName, f)));
@@ -5464,14 +6119,15 @@ function scoreHigherTaxonCommonMatch(candidateName: string | undefined, query: s
   const candWords = candFold.split(/[\s,/-]+/).filter(Boolean);
   if (candWords.length >= 2) {
     const hasExactOrPluralWord = candWords.some(w => pluralRegex.test(w));
-    // Örn: "Balık Kartalı" veya "Baykuş Güveleri" veya "Yalancı akrepler" -> sorgu yalnızca niteleyici ise skoru düşük tut
+    // Örn: "Eşek Arısı", "At Sinekleri", "Balık Kartalı" -> sorgu yalnızca niteleyiciyse reddet (50 < 65);
+    // "Tipik Örümcekler", "Zıplayan Örümcekler" -> ana başlık kelimesi sondaysa kabul et
     if (hasExactOrPluralWord) {
       const firstWord = candWords[0];
       const lastWord = candWords[candWords.length - 1];
       const isConjunctionHead = candWords.length >= 3 && (candWords[1] === 've' || candWords[1] === '&') && pluralRegex.test(firstWord);
       if (isConjunctionHead) return 92;
       const isLastWordHead = pluralRegex.test(lastWord);
-      return isLastWordHead ? 78 : 55;
+      return isLastWordHead ? (candWords.length === 2 ? 86 : 78) : 50;
     }
   }
 
@@ -5564,7 +6220,16 @@ async function resolveDynamicHigherTaxonGroups(
 
         const prefScore = scoreHigherTaxonCommonMatch(t.preferred_common_name, clean);
         const engScore = scoreHigherTaxonCommonMatch(t.english_common_name, clean);
-        const matchedScore = scoreHigherTaxonCommonMatch(t.matched_term, clean);
+        const rawMatchedScore =
+          t.matched_term && String(t.matched_term).toLowerCase() !== String(t.name).toLowerCase()
+            ? scoreHigherTaxonCommonMatch(t.matched_term, clean)
+            : 0;
+        const matchedScore =
+          prefScore > 0 || engScore > 0
+            ? rawMatchedScore
+            : foldTurkishChars(clean).length <= 2
+              ? 0
+              : Math.min(rawMatchedScore, 60);
         const bestNameScore = Math.max(prefScore, engScore, matchedScore);
         if (bestNameScore < 65) continue;
 
@@ -5596,6 +6261,7 @@ async function resolveDynamicHigherTaxonGroups(
 
     // Fallback: GBIF Backbone VERNACULAR üzerinden üst takson adayları (iNaturalist yetersiz kalırsa; soyu tükenmiş/fosil üst taksonları tercih etmez)
     if (rawCandidates.size === 0 && gbifVernOk && gbifVern.status === 'fulfilled' && Array.isArray(gbifVern.value.data?.results)) {
+      const cleanFoldLen = foldTurkishChars(clean).length;
       for (const r of gbifVern.value.data.results) {
         if (!r || !r.canonicalName || !r.rank) continue;
         if (String(r.kingdom || '').toLowerCase() !== 'animalia') continue;
@@ -5606,8 +6272,13 @@ async function resolveDynamicHigherTaxonGroups(
         let bestScore = 0;
         let matchedCommon = '';
         for (const v of vernList) {
-          if (!v?.vernacularName) continue;
+          if (!v?.vernacularName || v.vernacularName.length > 55) continue;
+          const lang = String(v.language || '').toLowerCase();
+          const isAllowedLang = lang === 'tur' || lang === 'eng' || lang === 'tr' || lang === 'en';
           const sc = scoreHigherTaxonCommonMatch(v.vernacularName, clean);
+          if (!isAllowedLang) {
+            if (lang || cleanFoldLen < 4 || sc < 100) continue;
+          }
           if (sc > bestScore) {
             bestScore = sc;
             matchedCommon = v.vernacularName;
@@ -5841,6 +6512,25 @@ export async function resolveSearchIntent(
 
   const words = normalizedInput.split(' ').filter(Boolean);
   const isGeneralGroupWord = !hasExplicitBinomialInParens && isGeneralGroupAliasQuery(normalizedInput);
+
+  // 1.5. Genel grup kelimesi olmayan, bilinen spesifik yaygın adlar (ör. "At", "Eşek", "Zebra", "Aslan")
+  //      GBIF Backbone'daki olası Latince cins/sinonim homonimlerinden (ör. Zebra -> Orthalicus) önce çözümlenir.
+  if (!isGeneralGroupWord && Boolean(lookupCommonSpeciesEntry(normalizedInput))) {
+    const speciesMatch = await matchSpecies(normalizedInput);
+    if (speciesMatch.matchType === 'ERROR') {
+      throw new Error(speciesMatch.summary || 'GBIF taksonomi doğrulama servisine erişilemedi.');
+    }
+    if (speciesMatch.isMatched && speciesMatch.usageKey && (!speciesMatch.rank || SPECIES_LEVEL_RANKS.has(speciesMatch.rank.toUpperCase()))) {
+      const singleRes: SearchIntentResult = {
+        mode: 'SINGLE_SPECIES',
+        query: normalizedInput,
+        countryCode: cleanCountry,
+        matchedSpecies: speciesMatch,
+      };
+      setCached(cacheKey, singleRes, 15 * 60 * 1000);
+      return singleRes;
+    }
+  }
 
   // 2. Tek kelimeli bilimsel üst takson sorgusu kontrolü (örn: Aves, Lepidoptera, Araneae, Coleoptera, Ursidae, Vulpes, Animalia)
   //    Cins/familya/takım/sınıf düzeyindeki eşleşmeler ASLA tek tür gibi döndürülmez; alt gruplarına ayrılır.
@@ -7366,14 +8056,17 @@ export async function discoverSpeciesByGroup(
         ? 'ERROR'
         : 'PARTIAL_ERROR';
 
-  // Opsiyonel iNaturalist zenginleştirme (yalnızca sayfa dilimi, tek-istekli lite mod, max 2 eşzamanlı host kuyruğu; hatalar önbelleğe alınmaz)
+  // Opsiyonel iNaturalist + doğrulanmış yedek görsel (Wikipedia/Wikimedia & GBIF StillImage) zenginleştirme
   let inatHadError = false;
   if (enrichWithInaturalist && pageSpecies.length > 0) {
     const inatSettled = await runWithConcurrencyLimit(
       pageSpecies,
       2,
       async (item) => {
-        const outcome = await fetchInatTaxon(item.canonicalName, { includeSummary: false });
+        const outcome = await fetchInatTaxon(item.canonicalName, {
+          includeSummary: false,
+          usageKey: item.acceptedUsageKey || item.usageKey,
+        });
         return { item, outcome };
       }
     );
@@ -7394,6 +8087,7 @@ export async function discoverSpeciesByGroup(
       if (!item.englishName && inat.englishName) item.englishName = inat.englishName;
       if (inat.photoUrl) item.photoUrl = inat.photoUrl;
       if (inat.photoAttribution) item.photoAttribution = inat.photoAttribution;
+      if (inat.photoSource) item.photoSource = inat.photoSource;
       if (inat.inatUrl) item.inaturalistUrl = inat.inatUrl;
       if (inat.iucnStatus) {
         item.iucnStatus = inat.iucnStatus;
@@ -7401,7 +8095,11 @@ export async function discoverSpeciesByGroup(
         item.iucnSource = 'iNaturalist & IUCN Kırmızı Liste Ortak Veri Ağı';
         item.iucnVerified = true;
       }
-      item.dataSource = 'GBIF Backbone + SpeciesProfiles + iNaturalist';
+      if (inat.inatUrl) {
+        item.dataSource = 'GBIF Backbone + SpeciesProfiles + iNaturalist';
+      } else if (inat.photoSource) {
+        item.dataSource = `GBIF Backbone + ${inat.photoSource}`;
+      }
     }
   }
 
@@ -7536,3 +8234,112 @@ export async function discoverSpeciesByGroup(
   return result;
   });
 }
+
+export interface ProgressiveEnrichmentOptions {
+  onUpdate?: (updatedItems: DiscoveredSpeciesItem[], completedKeys: Set<number>) => void;
+  shouldCancel?: () => boolean;
+}
+
+/**
+ * Büyük tür gruplarında arayüzü bloklamadan iNaturalist + sunucu doğrulamalı görselleri
+ * iki aşamalı ve sınırlı eşzamanlılıkla (Phase 1: hızlı iNat + toplu doğrulama, Phase 2: Wikipedia/GBIF yedeği) yükler.
+ */
+export async function enrichDiscoveryPageItems(
+  items: DiscoveredSpeciesItem[],
+  options: ProgressiveEnrichmentOptions = {}
+): Promise<DiscoveredSpeciesItem[]> {
+  const { onUpdate, shouldCancel } = options;
+  if (!items || items.length === 0) return items;
+
+  const working = items.map((item) => ({ ...item }));
+  const completedKeys = new Set<number>();
+  const getItemKey = (it: DiscoveredSpeciesItem) => it.acceptedUsageKey || it.usageKey;
+
+  // Phase 1: Hızlı iNaturalist sorgusu (fallback görsel zinciri olmadan, concurrency=3)
+  await runWithConcurrencyLimit(working, 3, async (item) => {
+    if (shouldCancel?.()) return;
+    const outcome = await fetchInatTaxon(item.canonicalName, {
+      includeSummary: false,
+      usageKey: getItemKey(item),
+      skipFallbackPhoto: true,
+    });
+    if (shouldCancel?.()) return;
+    if (outcome.status === 'FOUND') {
+      const inat = outcome.data;
+      if (!item.turkishName && inat.turkishName) item.turkishName = inat.turkishName;
+      if (!item.englishName && inat.englishName) item.englishName = inat.englishName;
+      if (inat.photoUrl) item.photoUrl = inat.photoUrl;
+      if (inat.photoAttribution) item.photoAttribution = inat.photoAttribution;
+      if (inat.photoSource) item.photoSource = inat.photoSource;
+      if (inat.inatUrl) item.inaturalistUrl = inat.inatUrl;
+      if (inat.iucnStatus) {
+        item.iucnStatus = inat.iucnStatus;
+        item.iucnCategoryName = inat.iucnCategoryName || getIucnLabel(inat.iucnStatus);
+        item.iucnSource = 'iNaturalist & IUCN Kırmızı Liste Ortak Veri Ağı';
+        item.iucnVerified = true;
+      }
+      if (inat.inatUrl) {
+        item.dataSource = 'GBIF Backbone + SpeciesProfiles + iNaturalist';
+      }
+    }
+  });
+
+  if (shouldCancel?.()) return working;
+
+  // Phase 1b: iNaturalist'ten gelen tüm görsel adaylarını tek bir sunucu toplu isteğiyle doğrula (sıfır tarayıcı CORS hatası)
+  const candidateUrls = working
+    .map((w) => w.photoUrl)
+    .filter((u): u is string => Boolean(u));
+
+  if (candidateUrls.length > 0) {
+    const verificationMap = await verifyImageAssetUrlsBatch(candidateUrls, 7000);
+    if (shouldCancel?.()) return working;
+
+    for (const item of working) {
+      if (!item.photoUrl) continue;
+      const check = verificationMap.get(item.photoUrl);
+      if (check?.verified) {
+        completedKeys.add(getItemKey(item));
+      } else {
+        item.photoUrl = undefined;
+        item.photoAttribution = undefined;
+        item.photoSource = undefined;
+      }
+    }
+  }
+
+  onUpdate?.(working.map((w) => ({ ...w })), new Set(completedKeys));
+
+  // Phase 2: Hâlâ doğrulanmış görseli olmayan türler için Wikipedia (HTTP 200) / GBIF StillImage yedeği (sınırlı eşzamanlılık=2)
+  const missingPhotoItems = working.filter((item) => !item.photoUrl);
+  if (missingPhotoItems.length === 0) {
+    for (const item of working) completedKeys.add(getItemKey(item));
+    onUpdate?.(working.map((w) => ({ ...w })), new Set(completedKeys));
+    return working;
+  }
+
+  await runWithConcurrencyLimit(missingPhotoItems, 2, async (item) => {
+    const key = getItemKey(item);
+    if (shouldCancel?.()) return;
+    try {
+      const fallback = await fetchVerifiedFallbackPhoto(item.canonicalName, key);
+      if (shouldCancel?.()) return;
+      if (fallback) {
+        item.photoUrl = fallback.photoUrl;
+        item.photoAttribution = fallback.photoAttribution;
+        item.photoSource = fallback.photoSource;
+        if (!item.inaturalistUrl) {
+          item.dataSource = `GBIF Backbone + ${fallback.photoSource}`;
+        }
+      }
+    } finally {
+      completedKeys.add(key);
+      if (!shouldCancel?.()) {
+        onUpdate?.(working.map((w) => ({ ...w })), new Set(completedKeys));
+      }
+    }
+  });
+
+  return working;
+}
+

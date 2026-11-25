@@ -80,6 +80,11 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
   onSelectSecondarySpecies,
   isLoadingSecondary,
 }) => {
+  const [failedPhotoUrls, setFailedPhotoUrls] = useState<Record<string, boolean>>({});
+  const markPhotoFailed = (url?: string) => {
+    if (!url) return;
+    setFailedPhotoUrls((prev) => (prev[url] ? prev : { ...prev, [url]: true }));
+  };
   const [customSecondaryQuery, setCustomSecondaryQuery] = useState('');
   const [isValidatingSecondary, setIsValidatingSecondary] = useState(false);
   const [secondaryError, setSecondaryError] = useState<string | null>(null);
@@ -89,6 +94,7 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
     usageKey?: number;
     canonicalName: string;
   } | null>(null);
+  const [lastSecondaryAttempt, setLastSecondaryAttempt] = useState<string>('');
 
   const p = primaryAnalysis;
   const s = secondaryAnalysis;
@@ -125,6 +131,7 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
       return;
     }
 
+    setLastSecondaryAttempt(trimmed);
     setSecondaryError(null);
     setSecondaryErrorType(null);
     setIsValidatingSecondary(true);
@@ -257,34 +264,53 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
             ? 'Aynı Tür Karşılaştırılamaz'
             : 'İkinci Tür Bulunamadı';
 
+        const retryTarget =
+          lastSecondaryAttempt ||
+          customSecondaryQuery.trim() ||
+          s?.species.canonicalName ||
+          s?.species.scientificName ||
+          '';
+
         return (
           <div
-            className={`mb-6 p-4 rounded-2xl border flex items-start gap-3 text-xs ${
+            className={`mb-6 p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
               isWarningTone
                 ? 'bg-amber-950/40 border-amber-700/60 text-amber-200'
                 : 'bg-rose-950/40 border-rose-700/60 text-rose-200'
             }`}
           >
-            <AlertCircle
-              className={`w-5 h-5 shrink-0 mt-0.5 ${
-                isWarningTone ? 'text-amber-400' : 'text-rose-400'
-              }`}
-            />
-            <div>
-              <strong
-                className={`font-bold block mb-0.5 ${
-                  isWarningTone ? 'text-amber-100' : 'text-rose-100'
+            <div className="flex items-start gap-3">
+              <AlertCircle
+                className={`w-5 h-5 shrink-0 mt-0.5 ${
+                  isWarningTone ? 'text-amber-400' : 'text-rose-400'
                 }`}
-              >
-                {headingText}
-              </strong>
-              <span>
-                {secondaryError ||
-                  (hasSecondaryApiError
-                    ? s?.species.summary || 'GBIF taksonomi veya veri kaynağına şu anda erişilemiyor. Lütfen tekrar deneyin.'
-                    : `"${s?.species.scientificName || ''}" için GBIF Backbone veritabanında geçerli bir ikinci tür eşleşmesi bulunamadı.`)}
-              </span>
+              />
+              <div>
+                <strong
+                  className={`font-bold block mb-0.5 ${
+                    isWarningTone ? 'text-amber-100' : 'text-rose-100'
+                  }`}
+                >
+                  {headingText}
+                </strong>
+                <span>
+                  {secondaryError ||
+                    (hasSecondaryApiError
+                      ? s?.species.summary || 'GBIF taksonomi veya veri kaynağına şu anda erişilemiyor. Lütfen tekrar deneyin.'
+                      : `"${s?.species.scientificName || ''}" için GBIF Backbone veritabanında geçerli bir ikinci tür eşleşmesi bulunamadı.`)}
+                </span>
+              </div>
             </div>
+            {isApiErr && retryTarget && (
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={() => handleSelectAndValidateSecondary(retryTarget)}
+                className="px-3.5 py-1.5 rounded-xl bg-amber-800/70 hover:bg-amber-700/80 text-white font-semibold shrink-0 cursor-pointer disabled:opacity-50"
+              >
+                Tekrar Dene
+              </button>
+            )}
           </div>
         );
       })()}
@@ -333,15 +359,16 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
           </div>
 
           <div className="flex items-start gap-4">
-            {p.species.photoUrl ? (
+            {p.species.photoUrl && !failedPhotoUrls[p.species.photoUrl] ? (
               <img
                 src={p.species.photoUrl}
-                alt={p.species.turkishName}
+                alt={p.species.turkishName || p.species.canonicalName}
                 className="w-20 h-20 rounded-xl object-cover border border-emerald-800/40 shrink-0"
                 referrerPolicy="no-referrer"
+                onError={() => markPhotoFailed(p.species.photoUrl)}
               />
             ) : (
-              <div className="w-20 h-20 rounded-xl bg-[#0b1510] border border-emerald-800/40 flex items-center justify-center text-xs text-emerald-400/50 shrink-0">
+              <div className="w-20 h-20 rounded-xl bg-[#0b1510] border border-emerald-800/40 flex items-center justify-center text-xs text-emerald-400/50 shrink-0 text-center px-1">
                 Görsel Yok
               </div>
             )}
@@ -395,15 +422,16 @@ export const SpeciesComparison: React.FC<SpeciesComparisonProps> = ({
           ) : validSecondary ? (
             <>
               <div className="flex items-start gap-4">
-                {validSecondary.species.photoUrl ? (
+                {validSecondary.species.photoUrl && !failedPhotoUrls[validSecondary.species.photoUrl] ? (
                   <img
                     src={validSecondary.species.photoUrl}
-                    alt={validSecondary.species.turkishName}
+                    alt={validSecondary.species.turkishName || validSecondary.species.canonicalName}
                     className="w-20 h-20 rounded-xl object-cover border border-amber-800/40 shrink-0"
                     referrerPolicy="no-referrer"
+                    onError={() => markPhotoFailed(validSecondary.species.photoUrl)}
                   />
                 ) : (
-                  <div className="w-20 h-20 rounded-xl bg-[#0b1510] border border-amber-800/40 flex items-center justify-center text-xs text-amber-400/50 shrink-0">
+                  <div className="w-20 h-20 rounded-xl bg-[#0b1510] border border-amber-800/40 flex items-center justify-center text-xs text-amber-400/50 shrink-0 text-center px-1">
                     Görsel Yok
                   </div>
                 )}

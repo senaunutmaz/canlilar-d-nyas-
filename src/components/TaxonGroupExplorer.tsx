@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   resolveSearchIntent, 
   discoverSpeciesByGroup,
+  enrichDiscoveryPageItems,
   expandTaxonCandidateToSubgroupsPaged,
   enrichSubgroupLabels,
   TaxonSubgroupExpansionResult
@@ -30,7 +31,7 @@ import {
 interface TaxonGroupExplorerProps {
   searchQuery: string;
   countryCode: string;
-  onSelectSpecies: (scientificName: string, country: string) => void;
+  onSelectSpecies: (scientificName: string, country: string, turkishName?: string) => void;
   onBackToDefault: () => void;
   onCountryChange: (country: string) => void;
 }
@@ -59,6 +60,13 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
   const [currentCountry, setCurrentCountry] = useState<string>(countryCode);
   const [visibleSubgroupCount, setVisibleSubgroupCount] = useState<number>(16);
   const [isLoadingMoreSubgroups, setIsLoadingMoreSubgroups] = useState<boolean>(false);
+  const [failedPhotoUrls, setFailedPhotoUrls] = useState<Record<string, boolean>>({});
+  const [enrichingPhotoKeys, setEnrichingPhotoKeys] = useState<Record<number, boolean>>({});
+
+  const markPhotoFailed = (url?: string) => {
+    if (!url) return;
+    setFailedPhotoUrls((prev) => (prev[url] ? prev : { ...prev, [url]: true }));
+  };
 
   const requestSeqRef = useRef<number>(0);
   const prevQueryRef = useRef<string | null>(null);
@@ -98,7 +106,11 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
         await loadSpeciesForGroup(intent.groups, firstId, cc, 1, includeFossil, seq);
       } else if (intent.mode === 'SINGLE_SPECIES' && intent.matchedSpecies?.scientificName) {
         setIsLoadingIntent(false);
-        onSelectSpecies(intent.matchedSpecies.canonicalName || intent.matchedSpecies.scientificName, cc);
+        onSelectSpecies(
+          intent.matchedSpecies.canonicalName || intent.matchedSpecies.scientificName,
+          cc,
+          intent.matchedSpecies.turkishName
+        );
       } else {
         setGroups([]);
         setSubgroupMeta(null);
@@ -126,6 +138,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
   ) => {
     const seq = existingSeq ?? ++requestSeqRef.current;
     setIsLoadingSpecies(true);
+    setEnrichingPhotoKeys({});
     setErrorMessage(null);
     setErrorType(null);
     try {
@@ -135,22 +148,57 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
         page,
         pageSize: 16,
         includeFossilOnly: fossil,
-        enrichWithInaturalist: true,
+        enrichWithInaturalist: false,
         groups: targetGroups,
       });
       if (seq !== requestSeqRef.current) return;
       setDiscoveryResult(res);
       setCurrentPage(page);
+      setIsLoadingIntent(false);
+      setIsLoadingSpecies(false);
+
+      if (res.species.length > 0) {
+        const pendingKeys: Record<number, boolean> = {};
+        for (const item of res.species) {
+          if (!item.photoUrl) {
+            pendingKeys[item.acceptedUsageKey || item.usageKey] = true;
+          }
+        }
+        setEnrichingPhotoKeys(pendingKeys);
+
+        void enrichDiscoveryPageItems(res.species, {
+          shouldCancel: () => seq !== requestSeqRef.current,
+          onUpdate: (updatedSpecies, completedKeys) => {
+            if (seq !== requestSeqRef.current) return;
+            setDiscoveryResult((prev) =>
+              prev ? { ...prev, species: updatedSpecies } : prev
+            );
+            const remainingKeys: Record<number, boolean> = {};
+            for (const item of updatedSpecies) {
+              const itemKey = item.acceptedUsageKey || item.usageKey;
+              if (!item.photoUrl && !completedKeys.has(itemKey)) {
+                remainingKeys[itemKey] = true;
+              }
+            }
+            setEnrichingPhotoKeys(remainingKeys);
+          },
+        })
+          .catch((enrichErr) => {
+            console.warn('Progressive species photo enrichment warning:', enrichErr);
+          })
+          .finally(() => {
+            if (seq === requestSeqRef.current) {
+              setEnrichingPhotoKeys({});
+            }
+          });
+      }
     } catch (err) {
       if (seq !== requestSeqRef.current) return;
       console.error('Species discovery load error:', err);
       setErrorType('ERROR');
       setErrorMessage('Tür keşif listesi yüklenirken bir hata oluştu.');
-    } finally {
-      if (seq === requestSeqRef.current) {
-        setIsLoadingIntent(false);
-        setIsLoadingSpecies(false);
-      }
+      setIsLoadingIntent(false);
+      setIsLoadingSpecies(false);
     }
   };
 
@@ -556,15 +604,28 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
           >
             {errorMessage}
           </p>
-          <button
-            type="button"
-            onClick={onBackToDefault}
-            className={`px-5 py-2.5 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
-              errorType === 'ERROR' ? 'bg-amber-800/70 hover:bg-amber-700/80' : 'bg-rose-900/60 hover:bg-rose-800'
-            }`}
-          >
-            Ana Sayfaya Dön
-          </button>
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            {errorType === 'ERROR' && (
+              <button
+                type="button"
+                onClick={() => loadGroupIntent(searchQuery, currentCountry)}
+                className="px-5 py-2.5 bg-amber-800/70 hover:bg-amber-700/80 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Tekrar Dene
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onBackToDefault}
+              className={`px-5 py-2.5 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+                errorType === 'ERROR'
+                  ? 'bg-[#13241b] hover:bg-emerald-950 border border-emerald-800/50'
+                  : 'bg-rose-900/60 hover:bg-rose-800'
+              }`}
+            >
+              Ana Sayfaya Dön
+            </button>
+          </div>
         </div>
       ) : (
         <div className="space-y-6">
@@ -604,21 +665,25 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
             </div>
           ) : discoveryResult?.species && discoveryResult.species.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-              {discoveryResult.species.map((item: DiscoveredSpeciesItem) => (
+              {discoveryResult.species.map((item: DiscoveredSpeciesItem) => {
+                const itemKey = item.acceptedUsageKey || item.usageKey;
+                const isCheckingPhoto = Boolean(enrichingPhotoKeys[itemKey]);
+                return (
                 <div
-                  key={item.acceptedUsageKey || item.usageKey}
-                  onClick={() => onSelectSpecies(item.canonicalName, currentCountry)}
+                  key={itemKey}
+                  onClick={() => onSelectSpecies(item.canonicalName, currentCountry, item.turkishName)}
                   className="group bg-[#111e17] hover:bg-[#13241b] rounded-2xl p-5 border border-emerald-900/60 hover:border-emerald-600/60 shadow-lg transition-all duration-300 flex flex-col justify-between cursor-pointer relative overflow-hidden"
                 >
                   <div>
                     {/* Thumbnail Image or Clean Visual Placeholder */}
-                    {item.photoUrl ? (
+                    {item.photoUrl && !failedPhotoUrls[item.photoUrl] ? (
                       <div className="w-full h-36 rounded-xl overflow-hidden mb-4 bg-emerald-950/40 relative">
                         <img
                           src={item.photoUrl}
-                          alt={item.canonicalName}
+                          alt={item.turkishName || item.canonicalName}
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                           referrerPolicy="no-referrer"
+                          onError={() => markPhotoFailed(item.photoUrl)}
                         />
                         <div className="absolute inset-0 bg-gradient-to-t from-[#111e17] via-transparent to-transparent opacity-80" />
                         <div className="absolute top-2 left-2">
@@ -627,6 +692,19 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                         <div className="absolute top-2 right-2">
                           {getExistenceBadge(item.existenceStatus)}
                         </div>
+                      </div>
+                    ) : isCheckingPhoto ? (
+                      <div className="w-full h-36 rounded-xl mb-4 bg-[#0b1510]/85 border border-emerald-900/50 relative flex flex-col items-center justify-center p-3 text-center">
+                        <div className="absolute top-2 left-2">
+                          {getIucnBadge(item.iucnStatus)}
+                        </div>
+                        <div className="absolute top-2 right-2">
+                          {getExistenceBadge(item.existenceStatus)}
+                        </div>
+                        <div className="w-5 h-5 border-2 border-emerald-900 border-t-emerald-400 rounded-full animate-spin mb-2 mt-4" />
+                        <span className="text-[11px] font-medium text-emerald-300/65">
+                          Görsel kontrol ediliyor...
+                        </span>
                       </div>
                     ) : (
                       <div className="w-full h-36 rounded-xl mb-4 bg-[#0b1510]/85 border border-emerald-900/50 relative flex flex-col items-center justify-center p-3 text-center">
@@ -724,7 +802,8 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                     </span>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           ) : discoveryResult?.catalogErrorMessage ? (
             <div className="py-16 px-6 flex flex-col items-center justify-center text-center bg-amber-950/25 rounded-2xl border border-amber-700/50">

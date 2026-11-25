@@ -12,6 +12,7 @@ interface HomePageProps {
   onCountryChange: (country: string) => void;
   errorMessage?: string | null;
   errorType?: SearchErrorType | null;
+  onRetry?: () => void;
 }
 
 export const HomePage: React.FC<HomePageProps> = ({
@@ -21,6 +22,7 @@ export const HomePage: React.FC<HomePageProps> = ({
   onCountryChange,
   errorMessage,
   errorType,
+  onRetry,
 }) => {
   const navigate = useNavigate();
   const isApiError = errorType === 'ERROR';
@@ -41,31 +43,42 @@ export const HomePage: React.FC<HomePageProps> = ({
       {!isLoading && errorMessage && (
         <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
           <div
-            className={`p-5 rounded-2xl border flex items-start gap-3 ${
+            className={`p-5 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 ${
               isApiError
                 ? 'bg-amber-950/40 border-amber-700/50'
                 : 'bg-rose-950/40 border-rose-700/50'
             }`}
           >
-            <AlertCircle
-              className={`w-5 h-5 shrink-0 mt-0.5 ${isApiError ? 'text-amber-400' : 'text-rose-400'}`}
-            />
-            <div>
-              <h3
-                className={`text-sm font-bold mb-0.5 ${
-                  isApiError ? 'text-amber-200' : 'text-rose-200'
-                }`}
-              >
-                {isApiError ? 'Veri Kaynağına Erişilemedi' : 'Sonuç Bulunamadı'}
-              </h3>
-              <p
-                className={`text-xs sm:text-sm leading-relaxed ${
-                  isApiError ? 'text-amber-200/90' : 'text-rose-200/90'
-                }`}
-              >
-                {errorMessage}
-              </p>
+            <div className="flex items-start gap-3">
+              <AlertCircle
+                className={`w-5 h-5 shrink-0 mt-0.5 ${isApiError ? 'text-amber-400' : 'text-rose-400'}`}
+              />
+              <div>
+                <h3
+                  className={`text-sm font-bold mb-0.5 ${
+                    isApiError ? 'text-amber-200' : 'text-rose-200'
+                  }`}
+                >
+                  {isApiError ? 'Veri Kaynağına Erişilemedi' : 'Sonuç Bulunamadı'}
+                </h3>
+                <p
+                  className={`text-xs sm:text-sm leading-relaxed ${
+                    isApiError ? 'text-amber-200/90' : 'text-rose-200/90'
+                  }`}
+                >
+                  {errorMessage}
+                </p>
+              </div>
             </div>
+            {isApiError && onRetry && (
+              <button
+                type="button"
+                onClick={onRetry}
+                className="px-4 py-2 bg-amber-800/70 hover:bg-amber-700/80 text-white rounded-xl text-xs font-semibold transition-colors shrink-0 cursor-pointer"
+              >
+                Tekrar Dene
+              </button>
+            )}
           </div>
         </section>
       )}

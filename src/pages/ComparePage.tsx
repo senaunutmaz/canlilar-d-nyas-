@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { SpeciesComparison } from '../components/SpeciesComparison';
 import { SpeciesAnalysis, SearchErrorType } from '../types/biodiversity';
 import { Scale, Compass, AlertCircle } from 'lucide-react';
@@ -12,6 +13,7 @@ interface ComparePageProps {
   errorMessage?: string | null;
   errorType?: SearchErrorType | null;
   onSearch: (query: string, country: string) => void;
+  onRetry?: () => void;
   activeCountry: string;
 }
 
@@ -23,9 +25,10 @@ export const ComparePage: React.FC<ComparePageProps> = ({
   isLoading = false,
   errorMessage,
   errorType,
-  onSearch,
+  onRetry,
   activeCountry,
 }) => {
+  const navigate = useNavigate();
   const isApiError = errorType === 'ERROR';
 
   return (
@@ -81,15 +84,26 @@ export const ComparePage: React.FC<ComparePageProps> = ({
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => onSearch('Ursus arctos', activeCountry)}
-            className={`px-4 py-2 text-white rounded-xl text-xs font-semibold transition-colors shrink-0 cursor-pointer ${
-              isApiError ? 'bg-amber-800/70 hover:bg-amber-700/80' : 'bg-rose-900/60 hover:bg-rose-800/60'
-            }`}
-          >
-            Bozayı Kaydını Yükle
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {isApiError && onRetry && (
+              <button
+                type="button"
+                onClick={onRetry}
+                className="px-4 py-2 bg-amber-800/70 hover:bg-amber-700/80 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Tekrar Dene
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => navigate(`/kesfet?country=${encodeURIComponent(activeCountry)}`)}
+              className={`px-4 py-2 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+                isApiError ? 'bg-[#13241b] hover:bg-emerald-950 border border-emerald-800/50' : 'bg-rose-900/60 hover:bg-rose-800/60'
+              }`}
+            >
+              Tür Keşfine Git
+            </button>
+          </div>
         </div>
       ) : primaryAnalysis ? (
         <SpeciesComparison
@@ -107,10 +121,10 @@ export const ComparePage: React.FC<ComparePageProps> = ({
           </p>
           <button
             type="button"
-            onClick={() => onSearch('Ursus arctos', activeCountry)}
+            onClick={() => navigate(`/kesfet?country=${encodeURIComponent(activeCountry)}`)}
             className="px-5 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-[#0b1510] font-bold text-xs rounded-xl transition-all cursor-pointer"
           >
-            Bozayı Kaydını Yükle
+            Tür Keşfine Git
           </button>
         </div>
       )}

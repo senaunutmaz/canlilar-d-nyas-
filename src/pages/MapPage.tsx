@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { InteractiveMap } from '../components/InteractiveMap';
 import { SpeciesAnalysis, SearchErrorType } from '../types/biodiversity';
 import { MapPin, Search, Compass, AlertCircle } from 'lucide-react';
@@ -11,6 +12,7 @@ interface MapPageProps {
   onCountryChange: (country: string) => void;
   errorMessage?: string | null;
   errorType?: SearchErrorType | null;
+  onRetry?: () => void;
 }
 
 export const MapPage: React.FC<MapPageProps> = ({
@@ -21,7 +23,9 @@ export const MapPage: React.FC<MapPageProps> = ({
   onCountryChange,
   errorMessage,
   errorType,
+  onRetry,
 }) => {
+  const navigate = useNavigate();
   const [searchInput, setSearchInput] = useState<string>('');
   const isApiError = errorType === 'ERROR';
 
@@ -144,15 +148,26 @@ export const MapPage: React.FC<MapPageProps> = ({
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => onSearch('Ursus arctos', activeCountry)}
-            className={`px-4 py-2 text-white rounded-xl text-xs font-semibold transition-colors shrink-0 cursor-pointer ${
-              isApiError ? 'bg-amber-800/70 hover:bg-amber-700/80' : 'bg-rose-900/60 hover:bg-rose-800/60'
-            }`}
-          >
-            Bozayı Kaydını Yükle
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {isApiError && onRetry && (
+              <button
+                type="button"
+                onClick={onRetry}
+                className="px-4 py-2 bg-amber-800/70 hover:bg-amber-700/80 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Tekrar Dene
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => navigate(`/kesfet?country=${encodeURIComponent(activeCountry)}`)}
+              className={`px-4 py-2 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+                isApiError ? 'bg-[#13241b] hover:bg-emerald-950 border border-emerald-800/50' : 'bg-rose-900/60 hover:bg-rose-800/60'
+              }`}
+            >
+              Tür Keşfine Git
+            </button>
+          </div>
         </div>
       ) : primaryAnalysis ? (
         <InteractiveMap
@@ -170,10 +185,10 @@ export const MapPage: React.FC<MapPageProps> = ({
           </p>
           <button
             type="button"
-            onClick={() => onSearch('Ursus arctos', activeCountry)}
+            onClick={() => navigate(`/kesfet?country=${encodeURIComponent(activeCountry)}`)}
             className="px-5 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-[#0b1510] font-bold text-xs rounded-xl transition-all cursor-pointer"
           >
-            Bozayı Kaydını Yükle
+            Tür Keşfine Git
           </button>
         </div>
       )}

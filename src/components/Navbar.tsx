@@ -9,15 +9,24 @@ interface NavbarProps {
   onSelectSpecies?: (scientificName: string) => void;
   activeSpecies?: string;
   activeCountry?: string;
+  activeCommonName?: string;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ activeSpecies, activeCountry }) => {
+export const Navbar: React.FC<NavbarProps> = ({ activeSpecies, activeCountry, activeCommonName }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const navigate = useNavigate();
 
-  const speciesParams = activeSpecies
-    ? `?species=${encodeURIComponent(activeSpecies)}&country=${encodeURIComponent(activeCountry ?? 'TR')}`
-    : '';
+  const speciesParams = (() => {
+    if (!activeSpecies) return '';
+    const params = new URLSearchParams({
+      species: activeSpecies,
+      country: activeCountry ?? 'TR',
+    });
+    if (activeCommonName) {
+      params.set('commonName', activeCommonName);
+    }
+    return `?${params.toString()}`;
+  })();
   const exploreParams = activeCountry !== undefined
     ? `?country=${encodeURIComponent(activeCountry)}`
     : '';
