@@ -2730,25 +2730,44 @@ export async function verifyImageAssetUrlsBatch(
 
   if (typeof window !== 'undefined') {
     const postBatch = async (batchUrls: string[], batchTimeoutMs: number): Promise<{ ok: boolean; results: Record<string, ImageAssetVerificationResult> }> => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), batchTimeoutMs);
-      try {
-        const res = await fetch('/api/media/verify-batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ urls: batchUrls }),
-          signal: controller.signal,
-        });
-        if (!res.ok) {
-          return { ok: false, results: {} };
-        }
-        const payload = await res.json();
-        return { ok: true, results: payload?.results || {} };
-      } catch {
-        return { ok: false, results: {} };
-      } finally {
-        clearTimeout(timer);
+      const chunks: string[][] = [];
+      for (let i = 0; i < batchUrls.length; i += 10) {
+        chunks.push(batchUrls.slice(i, i + 10));
       }
+
+      const chunkResponses = await Promise.all(
+        chunks.map(async (chunk) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), batchTimeoutMs);
+          try {
+            const res = await fetch('/api/media/verify-batch', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ urls: chunk }),
+              signal: controller.signal,
+            });
+            if (!res.ok) {
+              return { ok: false, results: {} as Record<string, ImageAssetVerificationResult> };
+            }
+            const payload = await res.json();
+            return { ok: true, results: (payload?.results || {}) as Record<string, ImageAssetVerificationResult> };
+          } catch {
+            return { ok: false, results: {} as Record<string, ImageAssetVerificationResult> };
+          } finally {
+            clearTimeout(timer);
+          }
+        })
+      );
+
+      const merged: Record<string, ImageAssetVerificationResult> = {};
+      let anyOk = false;
+      for (const cr of chunkResponses) {
+        if (cr.ok) {
+          anyOk = true;
+          Object.assign(merged, cr.results);
+        }
+      }
+      return { ok: anyOk, results: merged };
     };
 
     const firstAttempt = await postBatch(pendingUrls, timeoutMs);
