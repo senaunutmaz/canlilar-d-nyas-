@@ -2337,6 +2337,7 @@ export interface ImageAssetVerificationResult {
   contentType: string | null;
   magicType: string | null;
   corsOpaque?: boolean;
+  unverifiedFallback?: boolean;
   reason?: string;
 }
 
@@ -2396,6 +2397,76 @@ function isSafeRedirectTargetFallback(rawUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function isSafeClientImageUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      !host ||
+      host === 'localhost' ||
+      host.endsWith('.localhost') ||
+      host.endsWith('.local') ||
+      host === '::1' ||
+      host === '[::1]' ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^0\./.test(host) ||
+      /^169\.254\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+      /^\[?(fe80|fc00|fd)/i.test(host)
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isTrustedBiodiversityImageHost(rawUrl: string): boolean {
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase();
+    if (
+      host === 'inaturalist-open-data.s3.amazonaws.com' ||
+      host === 'static.inaturalist.org' ||
+      host.endsWith('.inaturalist.org') ||
+      host === 'upload.wikimedia.org' ||
+      host === 'thumb.wikimedia.org' ||
+      host === 'commons.wikimedia.org' ||
+      host === 'zenodo.org' ||
+      host.endsWith('.zenodo.org') ||
+      host === 'api.gbif.org' ||
+      host.endsWith('.gbif.org') ||
+      host === 'www.marine.csiro.au' ||
+      host === 'data.nhm.ac.uk' ||
+      host === 'media.australian.museum'
+    ) {
+      return true;
+    }
+    return /\.(?:jpe?g|png|webp|gif|avif)(?:$|\?)/i.test(rawUrl);
+  } catch {
+    return false;
+  }
+}
+
+export function canAllowSafeDirectFallback(
+  url: string,
+  res?: ImageAssetVerificationResult | null
+): boolean {
+  if (!isSafeClientImageUrl(url) || !isUsableImageThumbnailUrl(url)) return false;
+  if (!isTrustedBiodiversityImageHost(url)) return false;
+  if (!res) return false;
+  const reason = String(res.reason || '').toUpperCase();
+  const isVerifierUnavailable =
+    reason.startsWith('SERVER_VERIFY_') ||
+    reason === 'VERIFY_ERROR' ||
+    reason === 'HTTP_429' ||
+    (res.status === 0 && reason === 'TIMEOUT');
+  return isVerifierUnavailable;
 }
 
 export function isTransientMediaVerifyFailure(res?: ImageAssetVerificationResult | null): boolean {
@@ -2514,26 +2585,49 @@ export async function verifyImageAssetUrl(
           method: 'GET',
           signal: controller.signal,
         });
+        const respCt = (res.headers.get('content-type') || '').toLowerCase();
+        let normalized: ImageAssetVerificationResult;
         if (!res.ok) {
-          return {
+          normalized = {
             verified: false,
             status: res.status,
             contentType: null,
             magicType: null,
             reason: `SERVER_VERIFY_HTTP_${res.status}`,
           };
+        } else if (!respCt.includes('application/json')) {
+          normalized = {
+            verified: false,
+            status: res.status,
+            contentType: null,
+            magicType: null,
+            reason: 'SERVER_VERIFY_INVALID_RESPONSE',
+          };
+        } else {
+          const data = (await res.json()) as ImageAssetVerificationResult;
+          normalized = {
+            verified: Boolean(data?.verified),
+            status: typeof data?.status === 'number' ? data.status : 0,
+            contentType: data?.contentType ?? null,
+            magicType: data?.magicType ?? null,
+            reason: data?.reason,
+          };
         }
-        const data = (await res.json()) as ImageAssetVerificationResult;
-        const normalized: ImageAssetVerificationResult = {
-          verified: Boolean(data?.verified),
-          status: typeof data?.status === 'number' ? data.status : 0,
-          contentType: data?.contentType ?? null,
-          magicType: data?.magicType ?? null,
-          reason: data?.reason,
-        };
         if (normalized.verified) {
           setCached(cacheKey, normalized, 30 * 60 * 1000);
-        } else if (!isTransientMediaVerifyFailure(normalized)) {
+          return normalized;
+        }
+        if (canAllowSafeDirectFallback(url, normalized)) {
+          return {
+            verified: true,
+            status: normalized.status,
+            contentType: null,
+            magicType: null,
+            unverifiedFallback: true,
+            reason: 'SAFE_CLIENT_FALLBACK',
+          };
+        }
+        if (!isTransientMediaVerifyFailure(normalized)) {
           setCached(cacheKey, normalized, 10 * 60 * 1000);
         }
         return normalized;
@@ -2687,7 +2781,7 @@ export async function verifyImageAssetUrl(
       setCached(cacheKey, okRes, 30 * 60 * 1000);
       return okRes;
     } catch (err: any) {
-      return {
+      const errRes: ImageAssetVerificationResult = {
         verified: false,
         status: 0,
         contentType: null,
@@ -2698,6 +2792,17 @@ export async function verifyImageAssetUrl(
             ? 'SERVER_VERIFY_ERROR'
             : 'NETWORK_ERROR',
       };
+      if (typeof window !== 'undefined' && canAllowSafeDirectFallback(url, errRes)) {
+        return {
+          verified: true,
+          status: 0,
+          contentType: null,
+          magicType: null,
+          unverifiedFallback: true,
+          reason: 'SAFE_CLIENT_FALLBACK',
+        };
+      }
+      return errRes;
     } finally {
       clearTimeout(timer);
     }
@@ -2729,7 +2834,7 @@ export async function verifyImageAssetUrlsBatch(
   if (pendingUrls.length === 0) return resultMap;
 
   if (typeof window !== 'undefined') {
-    const postBatch = async (batchUrls: string[], batchTimeoutMs: number): Promise<{ ok: boolean; results: Record<string, ImageAssetVerificationResult> }> => {
+    const postBatch = async (batchUrls: string[], batchTimeoutMs: number): Promise<{ ok: boolean; httpStatus: number; invalidResponse: boolean; results: Record<string, ImageAssetVerificationResult> }> => {
       const chunks: string[][] = [];
       for (let i = 0; i < batchUrls.length; i += 10) {
         chunks.push(batchUrls.slice(i, i + 10));
@@ -2747,12 +2852,19 @@ export async function verifyImageAssetUrlsBatch(
               signal: controller.signal,
             });
             if (!res.ok) {
-              return { ok: false, results: {} as Record<string, ImageAssetVerificationResult> };
+              return { ok: false, httpStatus: res.status, invalidResponse: false, results: {} as Record<string, ImageAssetVerificationResult> };
+            }
+            const respCt = (res.headers.get('content-type') || '').toLowerCase();
+            if (!respCt.includes('application/json')) {
+              return { ok: false, httpStatus: res.status, invalidResponse: true, results: {} as Record<string, ImageAssetVerificationResult> };
             }
             const payload = await res.json();
-            return { ok: true, results: (payload?.results || {}) as Record<string, ImageAssetVerificationResult> };
+            if (!payload || typeof payload.results !== 'object') {
+              return { ok: false, httpStatus: res.status, invalidResponse: true, results: {} as Record<string, ImageAssetVerificationResult> };
+            }
+            return { ok: true, httpStatus: res.status, invalidResponse: false, results: payload.results as Record<string, ImageAssetVerificationResult> };
           } catch {
-            return { ok: false, results: {} as Record<string, ImageAssetVerificationResult> };
+            return { ok: false, httpStatus: 0, invalidResponse: false, results: {} as Record<string, ImageAssetVerificationResult> };
           } finally {
             clearTimeout(timer);
           }
@@ -2761,32 +2873,45 @@ export async function verifyImageAssetUrlsBatch(
 
       const merged: Record<string, ImageAssetVerificationResult> = {};
       let anyOk = false;
+      let lastStatus = 0;
+      let anyInvalid = false;
       for (const cr of chunkResponses) {
+        if (cr.httpStatus) lastStatus = cr.httpStatus;
+        if (cr.invalidResponse) anyInvalid = true;
         if (cr.ok) {
           anyOk = true;
           Object.assign(merged, cr.results);
         }
       }
-      return { ok: anyOk, results: merged };
+      return { ok: anyOk, httpStatus: lastStatus, invalidResponse: anyInvalid, results: merged };
     };
 
     const firstAttempt = await postBatch(pendingUrls, timeoutMs);
     const transientRetryUrls: string[] = [];
+    const endpointHardUnavailable =
+      !firstAttempt.ok && (firstAttempt.httpStatus === 404 || firstAttempt.httpStatus === 405 || firstAttempt.invalidResponse);
 
     for (const u of pendingUrls) {
+      const fallbackReason = firstAttempt.ok
+        ? 'SERVER_VERIFY_MISSING'
+        : firstAttempt.invalidResponse
+          ? 'SERVER_VERIFY_INVALID_RESPONSE'
+          : firstAttempt.httpStatus
+            ? `SERVER_VERIFY_HTTP_${firstAttempt.httpStatus}`
+            : 'SERVER_VERIFY_ERROR';
       const itemRes: ImageAssetVerificationResult = firstAttempt.results[u] || {
         verified: false,
-        status: 0,
+        status: firstAttempt.httpStatus,
         contentType: null,
         magicType: null,
-        reason: firstAttempt.ok ? 'SERVER_VERIFY_MISSING' : 'SERVER_VERIFY_ERROR',
+        reason: fallbackReason,
       };
       resultMap.set(u, itemRes);
       if (itemRes.verified) {
         setCached(`img-verify:v2:${u}`, itemRes, 30 * 60 * 1000);
       } else if (!isTransientMediaVerifyFailure(itemRes)) {
         setCached(`img-verify:v2:${u}`, itemRes, 10 * 60 * 1000);
-      } else if (transientRetryUrls.length < 8) {
+      } else if (!endpointHardUnavailable && transientRetryUrls.length < 8) {
         transientRetryUrls.push(u);
       }
     }
@@ -2806,6 +2931,21 @@ export async function verifyImageAssetUrlsBatch(
             setCached(`img-verify:v2:${u}`, retryRes, 10 * 60 * 1000);
           }
         }
+      }
+    }
+
+    // Doğrulama servisi geçici olarak erişilemez/hız limitli ise, SSRF korumalı güvenilir CDN görsellerinin doğrudan <img> ile denenmesine izin ver
+    for (const u of pendingUrls) {
+      const current = resultMap.get(u);
+      if (current && !current.verified && canAllowSafeDirectFallback(u, current)) {
+        resultMap.set(u, {
+          verified: true,
+          status: current.status,
+          contentType: null,
+          magicType: null,
+          unverifiedFallback: true,
+          reason: 'SAFE_CLIENT_FALLBACK',
+        });
       }
     }
 
@@ -3243,13 +3383,19 @@ export async function fetchVerifiedFallbackPhoto(
     );
 
     let winner: FallbackCandidatePhoto | null = null;
+    let winnerUnverifiedFallback = false;
     for (const cand of toVerify) {
       const check = verifiedMap.get(cand.photoUrl);
-      if (check?.verified) {
+      if (check?.verified && !check.unverifiedFallback) {
         winner = cand;
+        winnerUnverifiedFallback = false;
         break;
       }
-      if (isTransientMediaVerifyFailure(check)) {
+      if (check?.verified && !winner) {
+        winner = cand;
+        winnerUnverifiedFallback = true;
+      }
+      if (!check?.verified && isTransientMediaVerifyFailure(check)) {
         hadTransientError = true;
       }
     }
@@ -3295,7 +3441,7 @@ export async function fetchVerifiedFallbackPhoto(
       inatUrl: winner.inatUrl,
     };
 
-    if (useCache) {
+    if (useCache && !winnerUnverifiedFallback) {
       setCached(cacheKey, { kind: 'FOUND', data: out }, 30 * 60 * 1000);
     }
     return out;
@@ -3486,11 +3632,23 @@ export async function fetchInatTaxon(
       let photoUrl: string | undefined = taxon.default_photo?.medium_url || taxon.default_photo?.url;
       let photoAttribution: string | undefined = taxon.default_photo?.attribution;
       let photoSource: string | undefined = photoUrl ? 'iNaturalist' : undefined;
+      let usedUnverifiedPhotoFallback = false;
 
-      if (photoUrl && (!isUsableImageThumbnailUrl(photoUrl) || (!skipFallbackPhoto && !(await verifyImageAssetUrl(photoUrl, 5000)).verified))) {
-        photoUrl = undefined;
-        photoAttribution = undefined;
-        photoSource = undefined;
+      if (photoUrl) {
+        if (!isUsableImageThumbnailUrl(photoUrl)) {
+          photoUrl = undefined;
+          photoAttribution = undefined;
+          photoSource = undefined;
+        } else if (!skipFallbackPhoto) {
+          const verifyRes = await verifyImageAssetUrl(photoUrl, 5000);
+          if (!verifyRes.verified) {
+            photoUrl = undefined;
+            photoAttribution = undefined;
+            photoSource = undefined;
+          } else if (verifyRes.unverifiedFallback) {
+            usedUnverifiedPhotoFallback = true;
+          }
+        }
       }
 
       if (!photoUrl && !skipFallbackPhoto) {
@@ -3525,7 +3683,7 @@ export async function fetchInatTaxon(
       };
 
       // Eğer mevcut önbellekte summary varsa lite çağrısı onu ezmesin; fotoğrafı boşsa yalnızca fallback kontrol edilmişse önbelleğe yaz
-      if ((includeSummary || !cachedOutcome || cachedOutcome.status !== 'FOUND') && (photoUrl || !skipFallbackPhoto)) {
+      if ((includeSummary || !cachedOutcome || cachedOutcome.status !== 'FOUND') && (photoUrl || !skipFallbackPhoto) && !usedUnverifiedPhotoFallback) {
         setCached(cacheKey, found, 30 * 60 * 1000);
       }
       return found;

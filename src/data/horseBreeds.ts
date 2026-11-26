@@ -524,11 +524,13 @@ export async function fetchVerifiedHorseBreedPhotos(
           const check = verifiedMap.get(cand.url);
           if (check?.verified) {
             output[slug] = { photoUrl: cand.url, sourceTitle: cand.title };
-            BREED_PHOTO_CACHE.set(slug, {
-              photoUrl: cand.url,
-              sourceTitle: cand.title,
-              expiresAt: Date.now() + 30 * 60 * 1000,
-            });
+            if (!check.unverifiedFallback) {
+              BREED_PHOTO_CACHE.set(slug, {
+                photoUrl: cand.url,
+                sourceTitle: cand.title,
+                expiresAt: Date.now() + 30 * 60 * 1000,
+              });
+            }
           } else if (!isTransientMediaVerifyFailure(check)) {
             BREED_PHOTO_CACHE.set(slug, {
               photoUrl: '',
