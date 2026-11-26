@@ -5,6 +5,7 @@ import {
   enrichDiscoveryPageItems,
   expandTaxonCandidateToSubgroupsPaged,
   enrichSubgroupLabels,
+  fetchVerifiedFallbackPhoto,
   TaxonSubgroupExpansionResult
 } from '../services/gbif';
 import { 
@@ -62,10 +63,56 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
   const [isLoadingMoreSubgroups, setIsLoadingMoreSubgroups] = useState<boolean>(false);
   const [failedPhotoUrls, setFailedPhotoUrls] = useState<Record<string, boolean>>({});
   const [enrichingPhotoKeys, setEnrichingPhotoKeys] = useState<Record<number, boolean>>({});
+  const browserRetryAttemptedRef = useRef<Set<number>>(new Set());
 
-  const markPhotoFailed = (url?: string) => {
-    if (!url) return;
-    setFailedPhotoUrls((prev) => (prev[url] ? prev : { ...prev, [url]: true }));
+  const markPhotoFailed = (item?: DiscoveredSpeciesItem) => {
+    const failedUrl = item?.photoUrl;
+    if (!failedUrl || !item) return;
+    setFailedPhotoUrls((prev) => (prev[failedUrl] ? prev : { ...prev, [failedUrl]: true }));
+
+    const itemKey = item.acceptedUsageKey || item.usageKey;
+    if (browserRetryAttemptedRef.current.has(itemKey)) return;
+    browserRetryAttemptedRef.current.add(itemKey);
+
+    const activeSeq = requestSeqRef.current;
+    setEnrichingPhotoKeys((prev) => ({ ...prev, [itemKey]: true }));
+
+    void fetchVerifiedFallbackPhoto(item.canonicalName, itemKey, {
+      excludeUrls: new Set([failedUrl]),
+      includeInatSynonymCheck: true,
+    })
+      .then((alt) => {
+        if (activeSeq !== requestSeqRef.current || !alt) return;
+        setDiscoveryResult((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            species: prev.species.map((sp) => {
+              const spKey = sp.acceptedUsageKey || sp.usageKey;
+              if (spKey !== itemKey) return sp;
+              return {
+                ...sp,
+                photoUrl: alt.photoUrl,
+                photoAttribution: alt.photoAttribution,
+                photoSource: alt.photoSource,
+              };
+            }),
+          };
+        });
+      })
+      .catch(() => {
+        // Yedek görsel alınamazsa temiz yer tutucu korunur
+      })
+      .finally(() => {
+        if (activeSeq === requestSeqRef.current) {
+          setEnrichingPhotoKeys((prev) => {
+            if (!prev[itemKey]) return prev;
+            const next = { ...prev };
+            delete next[itemKey];
+            return next;
+          });
+        }
+      });
   };
 
   const requestSeqRef = useRef<number>(0);
@@ -691,7 +738,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                           alt={item.turkishName || item.canonicalName}
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                           referrerPolicy="no-referrer"
-                          onError={() => markPhotoFailed(item.photoUrl)}
+                          onError={() => markPhotoFailed(item)}
                         />
                         <div className="absolute top-2 left-2">
                           {getIucnBadge(item.iucnStatus)}

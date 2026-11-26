@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { SpeciesAnalysis } from '../types/biodiversity';
+import { fetchVerifiedFallbackPhoto } from '../services/gbif';
 import { Info, ExternalLink, ShieldAlert, Award, FileText, ImageOff } from 'lucide-react';
 
 interface SpeciesOverviewProps {
@@ -20,10 +21,41 @@ export const SpeciesOverview: React.FC<SpeciesOverviewProps> = ({ analysis }) =>
   } = analysis;
 
   const [imgLoadFailed, setImgLoadFailed] = useState(false);
+  const [overridePhoto, setOverridePhoto] = useState<{ photoUrl: string; photoAttribution: string } | null>(null);
+  const [triedBrowserFallback, setTriedBrowserFallback] = useState(false);
 
   useEffect(() => {
     setImgLoadFailed(false);
-  }, [species.photoUrl]);
+    setOverridePhoto(null);
+    setTriedBrowserFallback(false);
+  }, [species.photoUrl, species.usageKey]);
+
+  const activePhotoUrl = overridePhoto?.photoUrl || species.photoUrl;
+  const activeAttribution = overridePhoto?.photoAttribution || species.photoAttribution;
+
+  const handleImageError = () => {
+    const failedUrl = activePhotoUrl;
+    if (!triedBrowserFallback && failedUrl && species.canonicalName) {
+      setTriedBrowserFallback(true);
+      void fetchVerifiedFallbackPhoto(species.canonicalName, species.usageKey, {
+        excludeUrls: new Set([failedUrl]),
+        includeInatSynonymCheck: true,
+      })
+        .then((alt) => {
+          if (alt && alt.photoUrl !== failedUrl) {
+            setOverridePhoto({ photoUrl: alt.photoUrl, photoAttribution: alt.photoAttribution });
+            setImgLoadFailed(false);
+          } else {
+            setImgLoadFailed(true);
+          }
+        })
+        .catch(() => {
+          setImgLoadFailed(true);
+        });
+      return;
+    }
+    setImgLoadFailed(true);
+  };
 
   const coordinatePercentage = downloadedRecordsCount > 0 
     ? Math.round((mappedRecordsCount / downloadedRecordsCount) * 100) 
@@ -103,13 +135,13 @@ export const SpeciesOverview: React.FC<SpeciesOverviewProps> = ({ analysis }) =>
         {/* Left: Species Photo & IUCN Badge */}
         <div className="lg:col-span-4 flex flex-col gap-3">
           <div className="relative aspect-4/3 w-full rounded-xl overflow-hidden bg-[#F5F9F4] border border-[#D6E4DC] group">
-            {species.photoUrl && !imgLoadFailed ? (
+            {activePhotoUrl && !imgLoadFailed ? (
               <img
-                src={species.photoUrl}
+                src={activePhotoUrl}
                 alt={species.turkishName || species.scientificName}
                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                 referrerPolicy="no-referrer"
-                onError={() => setImgLoadFailed(true)}
+                onError={handleImageError}
               />
             ) : (
               <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center text-[#556B62]">
@@ -125,9 +157,9 @@ export const SpeciesOverview: React.FC<SpeciesOverviewProps> = ({ analysis }) =>
             </div>
           </div>
 
-          {species.photoUrl && !imgLoadFailed && species.photoAttribution && (
-            <p className="text-[11px] text-[#556B62] truncate" title={species.photoAttribution}>
-              Fotoğraf: {species.photoAttribution}
+          {activePhotoUrl && !imgLoadFailed && activeAttribution && (
+            <p className="text-[11px] text-[#556B62] truncate" title={activeAttribution}>
+              Fotoğraf: {activeAttribution}
             </p>
           )}
 

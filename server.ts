@@ -1036,7 +1036,7 @@ app.get('/api/media/verify', async (req: Request, res: Response): Promise<void> 
     return;
   }
   try {
-    const result = await verifyImageAssetUrl(rawUrl, 4500);
+    const result = await verifyImageAssetUrl(rawUrl, 5500, isSafeExternalImageUrl);
     res.json(result);
   } catch {
     res.json({
@@ -1073,13 +1073,13 @@ app.post('/api/media/verify-batch', async (req: Request, res: Response): Promise
     }
   }
 
-  const concurrency = 6;
+  const concurrency = 8;
   let idx = 0;
   const workers = Array.from({ length: Math.min(concurrency, validUrls.length) }, async () => {
     while (idx < validUrls.length) {
       const current = validUrls[idx++];
       try {
-        results[current] = await verifyImageAssetUrl(current, 4000);
+        results[current] = await verifyImageAssetUrl(current, 5500, isSafeExternalImageUrl);
       } catch {
         results[current] = {
           verified: false,

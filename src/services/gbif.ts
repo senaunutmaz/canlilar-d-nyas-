@@ -118,8 +118,8 @@ function getOrCreateHostQueue(hostKey: string): HostQueueState {
     const isInat = hostKey === 'inaturalist';
     const isWiki = hostKey === 'wikimedia';
     state = {
-      maxConcurrency: isInat ? 2 : isWiki ? 3 : 3,
-      minIntervalMs: isInat ? 160 : isWiki ? 80 : 70,
+      maxConcurrency: isInat ? 2 : isWiki ? 1 : 3,
+      minIntervalMs: isInat ? 280 : isWiki ? 320 : 70,
       activeCount: 0,
       lastStartedAt: 0,
       cooldownUntil: 0,
@@ -2309,6 +2309,7 @@ function formatShortLicenseLabel(rawLicense?: string): string {
 function isUsableImageThumbnailUrl(url: string | undefined): url is string {
   if (!url || typeof url !== 'string') return false;
   if (!url.startsWith('https://')) return false;
+  if (/^https:\/\/ids\.si\.edu\//i.test(url)) return false;
   if (/\.(svg|pdf|html|htm|cfm)(?:$|\?)/i.test(url)) return false;
   if (/\/(?:range|distribution|status_iucn|red_list|cladogram|phylogeny|commons-logo|flag_of|question_book|ambox|disambig)/i.test(url)) {
     return false;
@@ -2344,12 +2345,21 @@ function detectImageMagicBytes(bytes: Uint8Array): string | null {
   if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
   if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
   if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'image/gif';
+  if (bytes[0] === 0x42 && bytes[1] === 0x4d) return 'image/bmp';
   if (
     bytes.length >= 12 &&
     bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
     bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
   ) {
     return 'image/webp';
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70
+  ) {
+    const brand = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]).toLowerCase();
+    if (brand === 'avif' || brand === 'avis') return 'image/avif';
+    if (brand === 'heic' || brand === 'heix' || brand === 'mif1') return 'image/heic';
   }
   return null;
 }
@@ -2360,19 +2370,136 @@ function looksLikeTextOrHtmlPrefix(bytes: Uint8Array): boolean {
   return sample.startsWith('<!doctype') || sample.startsWith('<html') || sample.startsWith('<xml') || sample.startsWith('<?xml') || sample.startsWith('{');
 }
 
+function isSafeRedirectTargetFallback(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      !host ||
+      host === 'localhost' ||
+      host.endsWith('.localhost') ||
+      host.endsWith('.local') ||
+      host === '::1' ||
+      host === '[::1]' ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^0\./.test(host) ||
+      /^169\.254\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+      /^\[?(fe80|fc00|fd)/i.test(host)
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isTransientMediaVerifyFailure(res?: ImageAssetVerificationResult | null): boolean {
+  if (!res) return true;
+  if (res.verified) return false;
+  const reason = String(res.reason || '').toUpperCase();
+  if (
+    reason === 'INVALID_IMAGE_URL' ||
+    reason === 'INVALID_OR_UNSAFE_URL' ||
+    reason === 'UNSAFE_REDIRECT_URL' ||
+    reason === 'NON_IMAGE_CONTENT_TYPE' ||
+    reason === 'HTML_OR_NON_IMAGE_BYTES' ||
+    reason === 'UNRECOGNIZED_IMAGE_MAGIC' ||
+    reason === 'CORP_BLOCKED_IN_BROWSER'
+  ) {
+    return false;
+  }
+  if (res.status === 403 || res.status === 404 || res.status === 410 || res.status === 400) {
+    return false;
+  }
+  if (res.status === 0 || res.status === 429 || res.status >= 500) {
+    return true;
+  }
+  return /TIMEOUT|ABORT|NETWORK|ERROR|MISSING|RATE_LIMIT|TOO_MANY_REDIRECTS/.test(reason);
+}
+
+async function fetchImageResponseWithSafeRedirects(
+  startUrl: string,
+  signal: AbortSignal,
+  validateUrl: (u: string) => boolean
+): Promise<{ ok: true; response: Response; finalUrl: string } | { ok: false; result: ImageAssetVerificationResult }> {
+  let currentUrl = startUrl;
+  for (let hop = 0; hop < 4; hop++) {
+    if (!validateUrl(currentUrl)) {
+      return {
+        ok: false,
+        result: {
+          verified: false,
+          status: 0,
+          contentType: null,
+          magicType: null,
+          reason: hop === 0 ? 'INVALID_OR_UNSAFE_URL' : 'UNSAFE_REDIRECT_URL',
+        },
+      };
+    }
+
+    const res = await fetch(currentUrl, {
+      method: 'GET',
+      redirect: 'manual',
+      headers: {
+        'User-Agent': 'CanliAtlasi/1.0 (https://github.com/canli-atlasi; educational-biodiversity-project)',
+        Accept: 'image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5',
+      },
+      signal,
+    });
+
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      try { await res.body?.cancel(); } catch { /* ignore */ }
+      if (!location) {
+        return {
+          ok: false,
+          result: {
+            verified: false,
+            status: res.status,
+            contentType: res.headers.get('content-type'),
+            magicType: null,
+            reason: `HTTP_${res.status}`,
+          },
+        };
+      }
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+
+    return { ok: true, response: res, finalUrl: currentUrl };
+  }
+
+  return {
+    ok: false,
+    result: {
+      verified: false,
+      status: 0,
+      contentType: null,
+      magicType: null,
+      reason: 'TOO_MANY_REDIRECTS',
+    },
+  };
+}
+
 /**
  * Görsel URL'sinin yalnızca HTTP 200 değil, gerçekten image/* Content-Type ve gerçek görsel baytları döndürdüğünü doğrular.
- * HTML/404 yanıtlarını reddeder; tarayıcıda CORS-opak img sunucuları için ağ hatasında zarif geri dönüş uygular.
+ * HTML/404 yanıtlarını reddeder; geçici ağ/429/5xx hatalarını kalıcı başarısızlık olarak önbelleğe almaz.
  */
 export async function verifyImageAssetUrl(
   url: string | undefined,
-  timeoutMs = 4500
+  timeoutMs = 5500,
+  validateExternalUrl?: (rawUrl: string) => boolean
 ): Promise<ImageAssetVerificationResult> {
   if (!isUsableImageThumbnailUrl(url)) {
     return { verified: false, status: 0, contentType: null, magicType: null, reason: 'INVALID_IMAGE_URL' };
   }
 
-  const cacheKey = `img-verify:v1:${url}`;
+  const cacheKey = `img-verify:v2:${url}`;
   const cached = getCached<ImageAssetVerificationResult>(cacheKey);
   if (cached) return cached;
 
@@ -2388,14 +2515,13 @@ export async function verifyImageAssetUrl(
           signal: controller.signal,
         });
         if (!res.ok) {
-          const unavailable: ImageAssetVerificationResult = {
+          return {
             verified: false,
             status: res.status,
             contentType: null,
             magicType: null,
             reason: `SERVER_VERIFY_HTTP_${res.status}`,
           };
-          return unavailable;
         }
         const data = (await res.json()) as ImageAssetVerificationResult;
         const normalized: ImageAssetVerificationResult = {
@@ -2405,17 +2531,57 @@ export async function verifyImageAssetUrl(
           magicType: data?.magicType ?? null,
           reason: data?.reason,
         };
-        setCached(cacheKey, normalized, normalized.verified ? 30 * 60 * 1000 : 5 * 60 * 1000);
+        if (normalized.verified) {
+          setCached(cacheKey, normalized, 30 * 60 * 1000);
+        } else if (!isTransientMediaVerifyFailure(normalized)) {
+          setCached(cacheKey, normalized, 10 * 60 * 1000);
+        }
         return normalized;
       }
 
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'CanliAtlasi/1.0 (https://github.com/canli-atlasi; educational-biodiversity-project)',
-        },
-        signal: controller.signal,
-      });
+      const safeValidator = validateExternalUrl || isSafeRedirectTargetFallback;
+      let res: Response | null = null;
+      let finalUrl = url;
+      let lastNetworkReason = 'NETWORK_ERROR';
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (controller.signal.aborted) break;
+        try {
+          const hopRes = await fetchImageResponseWithSafeRedirects(url, controller.signal, safeValidator);
+          if (!hopRes.ok) {
+            if (!isTransientMediaVerifyFailure(hopRes.result)) {
+              setCached(cacheKey, hopRes.result, 10 * 60 * 1000);
+            }
+            return hopRes.result;
+          }
+          res = hopRes.response;
+          finalUrl = hopRes.finalUrl;
+          if ((res.status === 429 || res.status >= 500) && attempt === 0 && !controller.signal.aborted) {
+            try { await res.body?.cancel(); } catch { /* ignore */ }
+            res = null;
+            await new Promise((r) => setTimeout(r, 250));
+            continue;
+          }
+          break;
+        } catch (err: any) {
+          lastNetworkReason = err?.name === 'AbortError' || controller.signal.aborted ? 'TIMEOUT' : 'NETWORK_ERROR';
+          if (attempt === 0 && lastNetworkReason === 'NETWORK_ERROR' && !controller.signal.aborted) {
+            await new Promise((r) => setTimeout(r, 250));
+            continue;
+          }
+        }
+      }
+
+      if (!res) {
+        return {
+          verified: false,
+          status: 0,
+          contentType: null,
+          magicType: null,
+          reason: lastNetworkReason,
+        };
+      }
+
       const contentType = res.headers.get('content-type');
       const ctLower = (contentType || '').toLowerCase();
 
@@ -2428,8 +2594,24 @@ export async function verifyImageAssetUrl(
           magicType: null,
           reason: `HTTP_${res.status}`,
         };
-        setCached(cacheKey, failed, 5 * 60 * 1000);
+        if (!isTransientMediaVerifyFailure(failed)) {
+          setCached(cacheKey, failed, 10 * 60 * 1000);
+        }
         return failed;
+      }
+
+      const corpHeader = (res.headers.get('cross-origin-resource-policy') || '').toLowerCase().trim();
+      if (corpHeader === 'same-origin' || corpHeader === 'same-site' || /(?:^|\/\/)ids\.si\.edu\//i.test(finalUrl)) {
+        try { await res.body?.cancel(); } catch { /* ignore */ }
+        const corpBlocked: ImageAssetVerificationResult = {
+          verified: false,
+          status: res.status,
+          contentType,
+          magicType: null,
+          reason: 'CORP_BLOCKED_IN_BROWSER',
+        };
+        setCached(cacheKey, corpBlocked, 10 * 60 * 1000);
+        return corpBlocked;
       }
 
       if (ctLower && !ctLower.startsWith('image/')) {
@@ -2504,13 +2686,17 @@ export async function verifyImageAssetUrl(
       };
       setCached(cacheKey, okRes, 30 * 60 * 1000);
       return okRes;
-    } catch {
+    } catch (err: any) {
       return {
         verified: false,
         status: 0,
         contentType: null,
         magicType: null,
-        reason: typeof window !== 'undefined' ? 'SERVER_VERIFY_ERROR' : 'FETCH_ERROR',
+        reason: err?.name === 'AbortError'
+          ? 'TIMEOUT'
+          : typeof window !== 'undefined'
+            ? 'SERVER_VERIFY_ERROR'
+            : 'NETWORK_ERROR',
       };
     } finally {
       clearTimeout(timer);
@@ -2520,7 +2706,7 @@ export async function verifyImageAssetUrl(
 
 export async function verifyImageAssetUrlsBatch(
   urls: string[],
-  timeoutMs = 7000
+  timeoutMs = 15000
 ): Promise<Map<string, ImageAssetVerificationResult>> {
   const resultMap = new Map<string, ImageAssetVerificationResult>();
   const pendingUrls: string[] = [];
@@ -2532,7 +2718,7 @@ export async function verifyImageAssetUrlsBatch(
       }
       continue;
     }
-    const cached = getCached<ImageAssetVerificationResult>(`img-verify:v1:${raw}`);
+    const cached = getCached<ImageAssetVerificationResult>(`img-verify:v2:${raw}`);
     if (cached) {
       resultMap.set(raw, cached);
     } else if (!pendingUrls.includes(raw)) {
@@ -2543,192 +2729,564 @@ export async function verifyImageAssetUrlsBatch(
   if (pendingUrls.length === 0) return resultMap;
 
   if (typeof window !== 'undefined') {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch('/api/media/verify-batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urls: pendingUrls }),
-        signal: controller.signal,
-      });
-      if (res.ok) {
-        const payload = await res.json();
-        const serverResults: Record<string, ImageAssetVerificationResult> = payload?.results || {};
-        for (const u of pendingUrls) {
-          const itemRes = serverResults[u] || {
-            verified: false,
-            status: 0,
-            contentType: null,
-            magicType: null,
-            reason: 'SERVER_VERIFY_MISSING',
-          };
-          setCached(`img-verify:v1:${u}`, itemRes, itemRes.verified ? 30 * 60 * 1000 : 5 * 60 * 1000);
-          resultMap.set(u, itemRes);
+    const postBatch = async (batchUrls: string[], batchTimeoutMs: number): Promise<{ ok: boolean; results: Record<string, ImageAssetVerificationResult> }> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), batchTimeoutMs);
+      try {
+        const res = await fetch('/api/media/verify-batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urls: batchUrls }),
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          return { ok: false, results: {} };
         }
-        return resultMap;
+        const payload = await res.json();
+        return { ok: true, results: payload?.results || {} };
+      } catch {
+        return { ok: false, results: {} };
+      } finally {
+        clearTimeout(timer);
       }
-    } catch {
-      // Sunucu toplu doğrulama erişilemezse tekil hata ile kapat (doğrulanmamış kabul etme)
-    } finally {
-      clearTimeout(timer);
-    }
+    };
+
+    const firstAttempt = await postBatch(pendingUrls, timeoutMs);
+    const transientRetryUrls: string[] = [];
+
     for (const u of pendingUrls) {
-      resultMap.set(u, { verified: false, status: 0, contentType: null, magicType: null, reason: 'SERVER_VERIFY_ERROR' });
+      const itemRes: ImageAssetVerificationResult = firstAttempt.results[u] || {
+        verified: false,
+        status: 0,
+        contentType: null,
+        magicType: null,
+        reason: firstAttempt.ok ? 'SERVER_VERIFY_MISSING' : 'SERVER_VERIFY_ERROR',
+      };
+      resultMap.set(u, itemRes);
+      if (itemRes.verified) {
+        setCached(`img-verify:v2:${u}`, itemRes, 30 * 60 * 1000);
+      } else if (!isTransientMediaVerifyFailure(itemRes)) {
+        setCached(`img-verify:v2:${u}`, itemRes, 10 * 60 * 1000);
+      } else if (transientRetryUrls.length < 8) {
+        transientRetryUrls.push(u);
+      }
     }
+
+    // Geçici ağ/zaman aşımı hataları için yalnızca başarısız kalan URL'leri sınırlı olarak 1 kez daha dene
+    if (transientRetryUrls.length > 0) {
+      await new Promise((r) => setTimeout(r, 350));
+      const retryAttempt = await postBatch(transientRetryUrls, Math.min(timeoutMs, 12000));
+      if (retryAttempt.ok) {
+        for (const u of transientRetryUrls) {
+          const retryRes = retryAttempt.results[u];
+          if (!retryRes) continue;
+          resultMap.set(u, retryRes);
+          if (retryRes.verified) {
+            setCached(`img-verify:v2:${u}`, retryRes, 30 * 60 * 1000);
+          } else if (!isTransientMediaVerifyFailure(retryRes)) {
+            setCached(`img-verify:v2:${u}`, retryRes, 10 * 60 * 1000);
+          }
+        }
+      }
+    }
+
     return resultMap;
   }
 
   await runWithConcurrencyLimit(pendingUrls, 4, async (u) => {
-    const r = await verifyImageAssetUrl(u, 4000);
+    const r = await verifyImageAssetUrl(u, 5000);
     resultMap.set(u, r);
     return r;
   });
   return resultMap;
 }
 
-/**
- * iNaturalist'te görseli olmayan türler için bilimsel ad doğrulamalı açık veri yedek görsel çözümleyici:
- * 1) Wikipedia MediaWiki Query API (HTTP 200 güvenli, 404 üretmez) + Wikimedia Commons
- * 2) GBIF Occurrence Media (StillImage, canlı gözlem öncelikli tek sorgu, exact speciesKey doğrulamalı + gerçek image/MIME kontrolü)
- */
-async function fetchVerifiedFallbackPhoto(
-  scientificName: string,
-  usageKey?: number
-): Promise<{ photoUrl: string; photoAttribution: string; photoSource: string } | null> {
-  const cleanSci = normalizeSearchQuery(scientificName);
-  if (!cleanSci) return null;
+export interface FallbackPhotoResult {
+  photoUrl: string;
+  photoAttribution: string;
+  photoSource: string;
+  inatUrl?: string;
+}
+
+interface FallbackCandidatePhoto {
+  photoUrl: string;
+  photoAttribution: string;
+  photoSource: string;
+  inatUrl?: string;
+  needsCommonsMeta?: boolean;
+  wikiPageTitle?: string;
+}
+
+function isCleanBioCommonsCandidate(title: string, url: string, mime?: string, metaText?: string, sciLower?: string): boolean {
+  const mimeLower = (mime || '').toLowerCase();
+  if (mimeLower && !mimeLower.startsWith('image/') && !mimeLower.includes('tiff')) return false;
+  if (/\.pdf(?:$|\?)/i.test(title) || /\.pdf(?:$|\?)/i.test(url)) return false;
+  const combined = `${title} ${url}`.toLowerCase();
+  if (/(?:verbreitung|distribution|range|cladogram|phylogeny|map|diagram|status_iucn|commons-logo|flag_of|question_book)/i.test(combined)) {
+    return false;
+  }
+  if (!sciLower) return false;
+  const normalizedTitle = title.replace(/^File:/i, '').replace(/[_-]+/g, ' ').toLowerCase();
+  const normalizedMeta = (metaText || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').toLowerCase();
+  return normalizedTitle.includes(sciLower) || normalizedMeta.includes(sciLower);
+}
+
+function validateWikipediaPageForTaxon(
+  page: any,
+  cleanSci: string
+): { photoUrl: string; wikiPageTitle: string } | null {
+  if (!page || page.missing !== undefined || page.invalid !== undefined) return null;
+  const thumb: string | undefined = page.thumbnail?.source;
+  if (!isUsableImageThumbnailUrl(thumb)) return null;
+
   const sciLower = cleanSci.toLowerCase();
   const sciWords = sciLower.split(' ').filter(Boolean);
   const genusLower = sciWords[0] || '';
   const speciesLower = sciWords[1] || '';
 
-  const cacheKey = `fallback-photo:v3:${sciLower}:${usageKey || 0}`;
-  const cached = getCached<{ photoUrl: string; photoAttribution: string; photoSource: string } | null>(cacheKey);
-  if (cached !== null) return cached;
+  const titleLower = String(page.title || '').toLowerCase();
+  const extractLower = String(page.extract || '').toLowerCase();
+  const descLower = Array.isArray(page.terms?.description)
+    ? String(page.terms.description[0] || '').toLowerCase()
+    : '';
 
-  return runDedupedInFlight(`in-flight:${cacheKey}`, async () => {
-    // 1. Wikipedia MediaWiki action=query (sayfa yoksa da HTTP 200 döner; 404 gürültüsü üretmez)
-    try {
-      const slug = cleanSci.replace(/\s+/g, '_');
-      const wikiRes = await fetchSafeJson<any>(
-        `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(slug)}&prop=pageimages|extracts|pageterms&exintro=1&explaintext=1&exchars=400&piprop=thumbnail&pithumbsize=500&redirects=1&format=json&origin=*`,
-        'Wikipedia Query API',
-        0,
-        4500
-      );
-      const pagesObj = wikiRes.ok ? wikiRes.data?.query?.pages : null;
-      const firstPage: any = pagesObj ? Object.values(pagesObj)[0] : null;
-      if (firstPage && firstPage.missing === undefined && firstPage.invalid === undefined) {
-        const thumb: string | undefined = firstPage.thumbnail?.source;
-        if (isUsableImageThumbnailUrl(thumb)) {
-          const titleLower = String(firstPage.title || '').toLowerCase();
-          const extractLower = String(firstPage.extract || '').toLowerCase();
-          const descLower = Array.isArray(firstPage.terms?.description)
-            ? String(firstPage.terms.description[0] || '').toLowerCase()
-            : '';
+  const hasExactTitle = titleLower === sciLower;
+  const hasBinomialInText = extractLower.includes(sciLower) || descLower.includes(sciLower);
+  const isBioTaxonPage =
+    /(?:species|subspecies|genus|animal|mammal|bird|reptile|amphibian|fish|insect|spider|arachnid|mollusc|cephalopod|octopus|crustacean|echinoderm|annelid|butterfly|moth|beetle|ant|wasp|bee|snake|lizard|frog|toad|turtle|shark)/i.test(descLower) ||
+    /(?:is a species|is a subspecies)/i.test(extractLower);
+  const hasSpeciesInGenusPage =
+    Boolean(genusLower && speciesLower) &&
+    extractLower.includes(genusLower) &&
+    extractLower.includes(speciesLower) &&
+    isBioTaxonPage;
 
-          const hasExactTitle = titleLower === sciLower;
-          const hasBinomialInText = extractLower.includes(sciLower) || descLower.includes(sciLower);
-          const isBioTaxonPage =
-            /(?:species|subspecies|genus|animal|mammal|bird|reptile|amphibian|fish|insect|spider|arachnid|mollusc|cephalopod|octopus|crustacean|echinoderm|annelid|butterfly|moth|beetle|ant|wasp|bee|snake|lizard|frog|toad|turtle|shark)/i.test(descLower) ||
-            /(?:is a species|is a subspecies)/i.test(extractLower);
-          const hasSpeciesInGenusPage =
-            Boolean(genusLower && speciesLower) &&
-            extractLower.includes(genusLower) &&
-            extractLower.includes(speciesLower) &&
-            isBioTaxonPage;
+  if (hasExactTitle || hasBinomialInText || hasSpeciesInGenusPage) {
+    return {
+      photoUrl: thumb,
+      wikiPageTitle: String(page.title || cleanSci),
+    };
+  }
+  return null;
+}
 
-          if (hasExactTitle || hasBinomialInText || hasSpeciesInGenusPage) {
-            const imgCheck = await verifyImageAssetUrl(thumb, 4000);
-            if (imgCheck.verified) {
-              let attribution = `Wikimedia Commons / Wikipedia (${firstPage.title || cleanSci})`;
-              const commonsFile = extractCommonsFilenameFromUrl(thumb);
-              if (commonsFile) {
-                try {
-                  const cmRes = await fetchSafeJson<any>(
-                    `https://commons.wikimedia.org/w/api.php?action=query&titles=${encodeURIComponent(`File:${commonsFile}`)}&prop=imageinfo&iiprop=extmetadata&format=json&origin=*`,
-                    'Wikimedia Commons Metadata API',
-                    0,
-                    3000
-                  );
-                  const pages = cmRes.ok && cmRes.data?.query?.pages ? Object.values(cmRes.data.query.pages) : [];
-                  const meta = (pages[0] as any)?.imageinfo?.[0]?.extmetadata;
-                  const rawArtist = String(meta?.Artist?.value || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
-                  const licenseShort = String(meta?.LicenseShortName?.value || '').trim();
-                  const shortArtist = rawArtist.length > 48 ? `${rawArtist.slice(0, 45)}...` : rawArtist;
-                  if (shortArtist && licenseShort) {
-                    attribution = `${shortArtist} · ${licenseShort} (Wikimedia Commons)`;
-                  } else if (licenseShort) {
-                    attribution = `${licenseShort} · Wikimedia Commons (${firstPage.title || cleanSci})`;
-                  }
-                } catch {
-                  // Commons meta opsiyoneldir
-                }
-              }
-              const out = { photoUrl: thumb, photoAttribution: attribution, photoSource: 'Wikimedia Commons' };
-              setCached(cacheKey, out, 30 * 60 * 1000);
-              return out;
-            }
-          }
-        }
-      }
-    } catch {
-      // Wikipedia fallback başarısızsa GBIF Media'ya geç
+/**
+ * Birden fazla tür için Wikipedia thumbnail ve takson doğrulamasını tek toplu API isteğiyle getirir
+ * (Wikimedia 429 hız sınırlarını önler).
+ */
+export async function fetchBatchWikipediaThumbnails(
+  scientificNames: string[]
+): Promise<{ map: Map<string, { photoUrl: string; wikiPageTitle: string } | null>; hadError: boolean }> {
+  const map = new Map<string, { photoUrl: string; wikiPageTitle: string } | null>();
+  let hadError = false;
+
+  const uniqueCleanNames: string[] = [];
+  const seenLower = new Set<string>();
+  for (const raw of scientificNames) {
+    const clean = normalizeSearchQuery(raw);
+    if (!clean) continue;
+    const lower = clean.toLowerCase();
+    if (!seenLower.has(lower)) {
+      seenLower.add(lower);
+      uniqueCleanNames.push(clean);
+    }
+  }
+
+  for (let i = 0; i < uniqueCleanNames.length; i += 20) {
+    const chunk = uniqueCleanNames.slice(i, i + 20);
+    const titlesParam = chunk.map((n) => n.replace(/\s+/g, '_')).join('|');
+    const res = await fetchSafeJson<any>(
+      `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(titlesParam)}&prop=pageimages|extracts|pageterms&exintro=1&explaintext=1&exchars=400&piprop=thumbnail&pithumbsize=500&redirects=1&format=json&origin=*`,
+      'Wikipedia Batch Query API',
+      0,
+      5500
+    );
+
+    if (!res.ok || !res.data?.query) {
+      hadError = true;
+      continue;
     }
 
-    // 2. GBIF Occurrence StillImage (tek birleştirilmiş sorgu — 429 yükünü azaltır, canlı gözlem öncelikli sıralar)
-    if (usageKey && Number.isFinite(usageKey)) {
-      const url = `https://api.gbif.org/v1/occurrence/search?speciesKey=${usageKey}&mediaType=StillImage&limit=8`;
-      const preferredOrder = ['HUMAN_OBSERVATION', 'OBSERVATION', 'MACHINE_OBSERVATION', 'LIVING_SPECIMEN', 'PRESERVED_SPECIMEN'];
+    const normalizedMap = new Map<string, string>();
+    for (const n of Array.isArray(res.data.query.normalized) ? res.data.query.normalized : []) {
+      if (n?.from && n?.to) normalizedMap.set(String(n.from), String(n.to));
+    }
 
-      try {
-        const occRes = await fetchSafeJson<{ results?: any[] }>(url, 'GBIF Occurrence Media API', 0, 5000);
-        if (occRes.ok && Array.isArray(occRes.data?.results) && occRes.data.results.length > 0) {
-          const sortedResults = [...occRes.data.results].sort((a, b) => {
-            const ia = preferredOrder.indexOf(String(a?.basisOfRecord || ''));
-            const ib = preferredOrder.indexOf(String(b?.basisOfRecord || ''));
-            return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    const redirectMap = new Map<string, string>();
+    for (const r of Array.isArray(res.data.query.redirects) ? res.data.query.redirects : []) {
+      if (r?.from && r?.to) redirectMap.set(String(r.from), String(r.to));
+    }
+
+    const pageByTitle = new Map<string, any>();
+    const pages = res.data.query.pages ? Object.values<any>(res.data.query.pages) : [];
+    for (const p of pages) {
+      if (p?.title) pageByTitle.set(String(p.title), p);
+    }
+
+    for (const clean of chunk) {
+      const slug = clean.replace(/\s+/g, '_');
+      let resolvedTitle = normalizedMap.get(slug) || normalizedMap.get(clean) || clean;
+      for (let hop = 0; hop < 3; hop++) {
+        const nextTitle = redirectMap.get(resolvedTitle);
+        if (!nextTitle || nextTitle === resolvedTitle) break;
+        resolvedTitle = nextTitle;
+      }
+      const page = pageByTitle.get(resolvedTitle);
+      map.set(clean.toLowerCase(), validateWikipediaPageForTaxon(page, clean));
+    }
+  }
+
+  return { map, hadError };
+}
+
+/**
+ * iNaturalist'te görseli olmayan veya ilk adayı başarısız olan türler için bilimsel ad doğrulamalı paralel yedek görsel çözümleyici:
+ * 1) iNaturalist Tam Tür / Eş Anlamlı Taksonomik Ad Eşleşmesi (/v1/taxa?q=...)
+ * 2) Wikipedia MediaWiki Query API (HTTP 200 güvenli veya toplu önbellekli)
+ * 3) GBIF Species Media (/v1/species/{usageKey}/media — Zenodo/müze/taksonomik levhalar)
+ * 4) GBIF Occurrence Media (taxonKey={usageKey}, StillImage)
+ * 5) Wikimedia Commons (yalnızca birebir bilimsel ad eşleşmesi doğrulanırsa)
+ */
+export async function fetchVerifiedFallbackPhoto(
+  scientificName: string,
+  usageKey?: number,
+  options?: {
+    excludeUrls?: Set<string>;
+    includeInatSynonymCheck?: boolean;
+    skipWikiQuery?: boolean;
+    preloadedWikiThumb?: { photoUrl: string; wikiPageTitle: string } | null;
+    skipCommonsSearch?: boolean;
+  }
+): Promise<FallbackPhotoResult | null> {
+  const cleanSci = normalizeSearchQuery(scientificName);
+  if (!cleanSci) return null;
+  const sciLower = cleanSci.toLowerCase();
+  const sciWords = sciLower.split(' ').filter(Boolean);
+  const excludeUrls = options?.excludeUrls;
+  const useCache = !excludeUrls || excludeUrls.size === 0;
+
+  const cacheKey = `fallback-photo:v4:${sciLower}:${usageKey || 0}:${options?.includeInatSynonymCheck ? 'syn' : 'nosyn'}`;
+  if (useCache) {
+    const cached = getCached<{ kind: 'FOUND'; data: FallbackPhotoResult } | { kind: 'NOT_FOUND' }>(cacheKey);
+    if (cached) {
+      return cached.kind === 'FOUND' ? cached.data : null;
+    }
+  }
+
+  return runDedupedInFlight(`in-flight:${cacheKey}:${excludeUrls ? Array.from(excludeUrls).join('|') : ''}`, async () => {
+    let hadTransientError = false;
+    const candidates: FallbackCandidatePhoto[] = [];
+    const seenCandidateUrls = new Set<string>();
+
+    const pushCandidate = (cand: FallbackCandidatePhoto) => {
+      if (!isUsableImageThumbnailUrl(cand.photoUrl)) return;
+      if (excludeUrls?.has(cand.photoUrl) || seenCandidateUrls.has(cand.photoUrl)) return;
+      seenCandidateUrls.add(cand.photoUrl);
+      candidates.push(cand);
+    };
+
+    const slug = cleanSci.replace(/\s+/g, '_');
+    const preloadedWiki = options?.preloadedWikiThumb ?? null;
+    const hasPreloadedWiki = Boolean(preloadedWiki && isUsableImageThumbnailUrl(preloadedWiki.photoUrl));
+
+    const [inatSynRes, wikiRes, spMediaRes, occRes, commonsRes] = await Promise.allSettled([
+      options?.includeInatSynonymCheck
+        ? fetchSafeJson<{ results?: any[] }>(
+            `https://api.inaturalist.org/v1/taxa?q=${encodeURIComponent(cleanSci)}&locale=tr&per_page=8`,
+            'iNaturalist Taxa Synonym API',
+            0,
+            5000
+          )
+        : Promise.resolve(null),
+      !options?.skipWikiQuery
+        ? fetchSafeJson<any>(
+            `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(slug)}&prop=pageimages|extracts|pageterms&exintro=1&explaintext=1&exchars=400&piprop=thumbnail&pithumbsize=500&redirects=1&format=json&origin=*`,
+            'Wikipedia Query API',
+            0,
+            4500
+          )
+        : Promise.resolve(null),
+      usageKey && Number.isFinite(usageKey)
+        ? fetchSafeJson<{ results?: any[] }>(
+            `https://api.gbif.org/v1/species/${usageKey}/media?limit=8`,
+            'GBIF Species Media API',
+            0,
+            4500
+          )
+        : Promise.resolve(null),
+      usageKey && Number.isFinite(usageKey)
+        ? fetchSafeJson<{ results?: any[] }>(
+            `https://api.gbif.org/v1/occurrence/search?taxonKey=${usageKey}&mediaType=StillImage&limit=8`,
+            'GBIF Occurrence Media API',
+            0,
+            4500
+          )
+        : Promise.resolve(null),
+      !options?.skipCommonsSearch && !hasPreloadedWiki
+        ? fetchSafeJson<any>(
+            `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(`"${cleanSci}"`)}&gsrnamespace=6&gsrlimit=4&prop=imageinfo&iiprop=url|mime|extmetadata&iiurlwidth=500&format=json&origin=*`,
+            'Wikimedia Commons Search API',
+            0,
+            4500
+          )
+        : Promise.resolve(null),
+    ]);
+
+    // 1. iNaturalist Tam Tür / Eş Anlamlı Ad Adayları
+    if (inatSynRes.status === 'fulfilled' && inatSynRes.value) {
+      if (!inatSynRes.value.ok) {
+        hadTransientError = true;
+      } else if (Array.isArray(inatSynRes.value.data?.results)) {
+        const matchedTaxon = inatSynRes.value.data.results.find((t: any) => {
+          const rankOk = t?.rank === 'species' || t?.rank === 'subspecies' || t?.rank === 'variety';
+          if (!rankOk) return false;
+          const exactName = typeof t?.name === 'string' && t.name.toLowerCase() === sciLower;
+          const exactSynonym =
+            sciWords.length >= 2 &&
+            typeof t?.matched_term === 'string' &&
+            t.matched_term.toLowerCase() === sciLower;
+          return exactName || exactSynonym;
+        });
+        const inatPhoto = matchedTaxon?.default_photo?.medium_url || matchedTaxon?.default_photo?.url;
+        if (inatPhoto) {
+          pushCandidate({
+            photoUrl: inatPhoto,
+            photoAttribution: matchedTaxon.default_photo?.attribution || `iNaturalist (${matchedTaxon.name})`,
+            photoSource: 'iNaturalist',
+            inatUrl: matchedTaxon.id ? `https://www.inaturalist.org/taxa/${matchedTaxon.id}` : undefined,
           });
+        }
+      }
+    } else if (inatSynRes.status === 'rejected') {
+      hadTransientError = true;
+    }
 
-          for (const occ of sortedResults) {
-            if (!occ) continue;
-            const occSpeciesKey = occ.speciesKey || occ.acceptedTaxonKey || occ.taxonKey;
-            if (occSpeciesKey && Number(occSpeciesKey) !== Number(usageKey)) continue;
-            if (!Array.isArray(occ.media)) continue;
+    // 2. Wikipedia Taxon Thumbnail (önceden toplu yüklenmiş veya tekil sorgulanmış)
+    let hasWikiThumb = false;
+    if (options?.skipWikiQuery) {
+      if (hasPreloadedWiki && preloadedWiki) {
+        hasWikiThumb = true;
+        pushCandidate({
+          photoUrl: preloadedWiki.photoUrl,
+          photoAttribution: `Wikimedia Commons / Wikipedia (${preloadedWiki.wikiPageTitle || cleanSci})`,
+          photoSource: 'Wikimedia Commons',
+          needsCommonsMeta: false,
+          wikiPageTitle: preloadedWiki.wikiPageTitle || cleanSci,
+        });
+      }
+    } else if (wikiRes.status === 'fulfilled' && wikiRes.value) {
+      if (!wikiRes.value.ok) {
+        hadTransientError = true;
+      } else {
+        const pagesObj = wikiRes.value.data?.query?.pages;
+        const firstPage: any = pagesObj ? Object.values(pagesObj)[0] : null;
+        const validWiki = validateWikipediaPageForTaxon(firstPage, cleanSci);
+        if (validWiki) {
+          hasWikiThumb = true;
+          pushCandidate({
+            photoUrl: validWiki.photoUrl,
+            photoAttribution: `Wikimedia Commons / Wikipedia (${validWiki.wikiPageTitle || cleanSci})`,
+            photoSource: 'Wikimedia Commons',
+            needsCommonsMeta: true,
+            wikiPageTitle: validWiki.wikiPageTitle || cleanSci,
+          });
+        }
+      }
+    } else if (wikiRes.status === 'rejected') {
+      hadTransientError = true;
+    }
 
-            for (const m of occ.media) {
-              if (!m || m.type !== 'StillImage' || !isUsableImageThumbnailUrl(m.identifier)) continue;
-              const fmt = String(m.format || '').toLowerCase();
-              const looksLikeImgUrl = /\.(jpe?g|png|webp)(?:$|\?)/i.test(m.identifier) || m.identifier.includes('/media/?');
-              if (fmt && !fmt.startsWith('image/')) continue;
-              if (!fmt && !looksLikeImgUrl) continue;
+    // 3. GBIF Species Media (/v1/species/{usageKey}/media — bilimsel tür levhaları ve müze kayıtları)
+    if (spMediaRes.status === 'fulfilled' && spMediaRes.value) {
+      if (!spMediaRes.value.ok) {
+        hadTransientError = true;
+      } else if (Array.isArray(spMediaRes.value.data?.results)) {
+        let added = 0;
+        for (const m of spMediaRes.value.data.results) {
+          if (added >= 3) break;
+          if (!m || m.type !== 'StillImage' || !isUsableImageThumbnailUrl(m.identifier)) continue;
+          if (m.taxonKey && usageKey && Number(m.taxonKey) !== Number(usageKey)) continue;
+          const fmt = String(m.format || '').toLowerCase();
+          if (fmt && !fmt.startsWith('image/')) continue;
+          const titleCheck = `${m.title || ''} ${m.description || ''} ${m.identifier}`.toLowerCase();
+          if (/(?:range|distribution|cladogram|phylogeny|map\b)/i.test(titleCheck)) continue;
 
-              const imgCheck = await verifyImageAssetUrl(m.identifier, 4000);
-              if (!imgCheck.verified) continue;
+          const holder = m.creator || m.rightsHolder || m.publisher || m.source || 'GBIF Species Media';
+          const lic = formatShortLicenseLabel(m.license);
+          const attribution = lic ? `${holder} · ${lic} (GBIF)` : `${holder} (GBIF)`;
+          pushCandidate({
+            photoUrl: m.identifier,
+            photoAttribution: attribution,
+            photoSource: 'GBIF Species Media',
+          });
+          added++;
+        }
+      }
+    } else if (spMediaRes.status === 'rejected') {
+      hadTransientError = true;
+    }
 
-              const holder = m.rightsHolder || m.creator || occ.recordedBy || occ.institutionCode || 'GBIF Occurrence';
-              const lic = formatShortLicenseLabel(m.license || occ.license);
-              const attribution = lic ? `${holder} · ${lic} (GBIF)` : `${holder} (GBIF)`;
-              const out = { photoUrl: m.identifier, photoAttribution: attribution, photoSource: 'GBIF Media' };
-              setCached(cacheKey, out, 30 * 60 * 1000);
-              return out;
-            }
+    // 4. GBIF Occurrence StillImage (taxonKey bazlı canlı ve müze gözlem kayıtları)
+    if (occRes.status === 'fulfilled' && occRes.value) {
+      if (!occRes.value.ok) {
+        hadTransientError = true;
+      } else if (Array.isArray(occRes.value.data?.results)) {
+        const preferredOrder = ['HUMAN_OBSERVATION', 'OBSERVATION', 'MACHINE_OBSERVATION', 'LIVING_SPECIMEN', 'PRESERVED_SPECIMEN'];
+        const sortedResults = [...occRes.value.data.results].sort((a, b) => {
+          const ia = preferredOrder.indexOf(String(a?.basisOfRecord || ''));
+          const ib = preferredOrder.indexOf(String(b?.basisOfRecord || ''));
+          return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+        });
+
+        let added = 0;
+        for (const occ of sortedResults) {
+          if (added >= 3) break;
+          if (!occ || !Array.isArray(occ.media)) continue;
+          const occKeyMatches =
+            Number(occ.speciesKey) === Number(usageKey) ||
+            Number(occ.acceptedTaxonKey) === Number(usageKey) ||
+            Number(occ.taxonKey) === Number(usageKey);
+          if (!occKeyMatches) continue;
+
+          for (const m of occ.media) {
+            if (added >= 3) break;
+            if (!m || m.type !== 'StillImage' || !isUsableImageThumbnailUrl(m.identifier)) continue;
+            const fmt = String(m.format || '').toLowerCase();
+            const looksLikeImgUrl = /\.(jpe?g|png|webp)(?:$|\?)/i.test(m.identifier) || m.identifier.includes('/media/?');
+            if (fmt && !fmt.startsWith('image/')) continue;
+            if (!fmt && !looksLikeImgUrl) continue;
+
+            const holder = m.rightsHolder || m.creator || occ.recordedBy || occ.institutionCode || 'GBIF Occurrence';
+            const lic = formatShortLicenseLabel(m.license || occ.license);
+            const attribution = lic ? `${holder} · ${lic} (GBIF)` : `${holder} (GBIF)`;
+            pushCandidate({
+              photoUrl: m.identifier,
+              photoAttribution: attribution,
+              photoSource: 'GBIF Media',
+            });
+            added++;
           }
         }
-      } catch {
-        // GBIF media isteği başarısızsa null döndür
+      }
+    } else if (occRes.status === 'rejected') {
+      hadTransientError = true;
+    }
+
+    // 5. Wikimedia Commons (yalnızca Wikipedia görseli yoksa ve birebir bilimsel ad eşleşmesi varsa)
+    if (!hasWikiThumb && commonsRes.status === 'fulfilled' && commonsRes.value) {
+      if (!commonsRes.value.ok) {
+        hadTransientError = true;
+      } else {
+        const cPages = commonsRes.value.data?.query?.pages ? Object.values<any>(commonsRes.value.data.query.pages) : [];
+        let added = 0;
+        for (const p of cPages) {
+          if (added >= 2) break;
+          const ii = p?.imageinfo?.[0];
+          const thumbUrl = ii?.thumburl || ii?.url;
+          if (!thumbUrl || !isUsableImageThumbnailUrl(thumbUrl)) continue;
+          const meta = ii?.extmetadata;
+          const metaText = `${meta?.ObjectName?.value || ''} ${meta?.ImageDescription?.value || ''}`;
+          if (!isCleanBioCommonsCandidate(String(p.title || ''), thumbUrl, ii?.mime, metaText, sciLower)) {
+            continue;
+          }
+          const rawArtist = String(meta?.Artist?.value || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+          const licenseShort = String(meta?.LicenseShortName?.value || '').trim();
+          const shortArtist = rawArtist.length > 48 ? `${rawArtist.slice(0, 45)}...` : rawArtist;
+          const attribution = shortArtist && licenseShort
+            ? `${shortArtist} · ${licenseShort} (Wikimedia Commons)`
+            : licenseShort
+              ? `${licenseShort} · Wikimedia Commons (${cleanSci})`
+              : `Wikimedia Commons (${cleanSci})`;
+          pushCandidate({
+            photoUrl: thumbUrl,
+            photoAttribution: attribution,
+            photoSource: 'Wikimedia Commons',
+          });
+          added++;
+        }
+      }
+    } else if (!hasWikiThumb && commonsRes.status === 'rejected') {
+      hadTransientError = true;
+    }
+
+    if (candidates.length === 0) {
+      if (useCache && !hadTransientError) {
+        setCached(cacheKey, { kind: 'NOT_FOUND' }, 3 * 60 * 1000);
+      }
+      return null;
+    }
+
+    // Aday görselleri tek toplu doğrulamadan geçir
+    const toVerify = candidates.slice(0, 6);
+    const verifiedMap = await verifyImageAssetUrlsBatch(
+      toVerify.map((c) => c.photoUrl),
+      12000
+    );
+
+    let winner: FallbackCandidatePhoto | null = null;
+    for (const cand of toVerify) {
+      const check = verifiedMap.get(cand.photoUrl);
+      if (check?.verified) {
+        winner = cand;
+        break;
+      }
+      if (isTransientMediaVerifyFailure(check)) {
+        hadTransientError = true;
       }
     }
 
-    return null;
+    if (!winner) {
+      if (useCache && !hadTransientError) {
+        setCached(cacheKey, { kind: 'NOT_FOUND' }, 3 * 60 * 1000);
+      }
+      return null;
+    }
+
+    let finalAttribution = winner.photoAttribution;
+    if (winner.needsCommonsMeta) {
+      const commonsFile = extractCommonsFilenameFromUrl(winner.photoUrl);
+      if (commonsFile) {
+        try {
+          const cmRes = await fetchSafeJson<any>(
+            `https://commons.wikimedia.org/w/api.php?action=query&titles=${encodeURIComponent(`File:${commonsFile}`)}&prop=imageinfo&iiprop=extmetadata&format=json&origin=*`,
+            'Wikimedia Commons Metadata API',
+            0,
+            2500
+          );
+          const pages = cmRes.ok && cmRes.data?.query?.pages ? Object.values(cmRes.data.query.pages) : [];
+          const meta = (pages[0] as any)?.imageinfo?.[0]?.extmetadata;
+          const rawArtist = String(meta?.Artist?.value || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+          const licenseShort = String(meta?.LicenseShortName?.value || '').trim();
+          const shortArtist = rawArtist.length > 48 ? `${rawArtist.slice(0, 45)}...` : rawArtist;
+          if (shortArtist && licenseShort) {
+            finalAttribution = `${shortArtist} · ${licenseShort} (Wikimedia Commons)`;
+          } else if (licenseShort) {
+            finalAttribution = `${licenseShort} · Wikimedia Commons (${winner.wikiPageTitle || cleanSci})`;
+          }
+        } catch {
+          // Commons meta opsiyoneldir
+        }
+      }
+    }
+
+    const out: FallbackPhotoResult = {
+      photoUrl: winner.photoUrl,
+      photoAttribution: finalAttribution,
+      photoSource: winner.photoSource,
+      inatUrl: winner.inatUrl,
+    };
+
+    if (useCache) {
+      setCached(cacheKey, { kind: 'FOUND', data: out }, 30 * 60 * 1000);
+    }
+    return out;
   });
 }
 
 /**
  * iNaturalist API'den fotoğraf, Türkçe/İngilizce isim ve özet çekme
  * (results[0] körü körüne alınmaz; bilimsel ad ve species rank eşleşmesi esas alınır;
- * iNaturalist'te fotoğraf eksikse Wikipedia/Wikimedia & GBIF StillImage ile doğrulanmış yedek görsel çözümlenir;
+ * iNaturalist'te fotoğraf eksikse Wikipedia/Wikimedia & GBIF Species/Occurrence Media ile doğrulanmış yedek görsel çözümlenir;
  * gerçek bulunamama durumu ile HTTP/XML/ağ hataları net biçimde ayrıştırılır)
  */
 export async function fetchInatTaxon(
@@ -2737,12 +3295,13 @@ export async function fetchInatTaxon(
 ): Promise<InatTaxonFetchOutcome> {
   const cleanSci = normalizeSearchQuery(scientificName).toLowerCase();
   if (!cleanSci) return { status: 'NOT_FOUND' };
+  const isBinomialQuery = cleanSci.split(' ').filter(Boolean).length >= 2;
 
   const includeSummary = options.includeSummary ?? true;
   const skipFallbackPhoto = options.skipFallbackPhoto ?? false;
   const usageKey = options.usageKey;
-  const cacheKey = `inat-taxon:v3:${cleanSci}`;
-  const notFoundKey = `inat-taxon-nf:v3:${cleanSci}:${skipFallbackPhoto ? 0 : (usageKey || 0)}`;
+  const cacheKey = `inat-taxon:v4:${cleanSci}`;
+  const notFoundKey = `inat-taxon-nf:v4:${cleanSci}:${skipFallbackPhoto ? 0 : (usageKey || 0)}`;
   const cachedOutcome = getCached<InatTaxonFetchOutcome>(cacheKey);
   if (cachedOutcome) {
     if (
@@ -2766,12 +3325,22 @@ export async function fetchInatTaxon(
           t.name.toLowerCase() === cleanSci &&
           (t.rank === 'species' || t.rank === 'subspecies' || t.rank === 'variety')
       );
-      return (
-        exactSpecies ||
-        results.find(
-          (t: any) => typeof t?.name === 'string' && t.name.toLowerCase() === cleanSci
-        )
+      if (exactSpecies) return exactSpecies;
+
+      const exactAnyName = results.find(
+        (t: any) => typeof t?.name === 'string' && t.name.toLowerCase() === cleanSci
       );
+      if (exactAnyName) return exactAnyName;
+
+      if (isBinomialQuery) {
+        return results.find(
+          (t: any) =>
+            (t?.rank === 'species' || t?.rank === 'subspecies' || t?.rank === 'variety') &&
+            typeof t?.matched_term === 'string' &&
+            t.matched_term.toLowerCase() === cleanSci
+        );
+      }
+      return undefined;
     };
 
     try {
@@ -2838,11 +3407,14 @@ export async function fetchInatTaxon(
 
       if (!exactAny) {
         if (skipFallbackPhoto) {
+          // Lite modda Phase 2 eş anlamlı / yedek kaynak kontrolü yapılacağı için kısa tutulur
           const notFoundFast: InatTaxonFetchOutcome = { status: 'NOT_FOUND' };
-          setCached(notFoundKey, notFoundFast, 10 * 60 * 1000);
+          setCached(notFoundKey, notFoundFast, 3 * 60 * 1000);
           return notFoundFast;
         }
-        const fallbackPhoto = await fetchVerifiedFallbackPhoto(scientificName, usageKey);
+        const fallbackPhoto = await fetchVerifiedFallbackPhoto(scientificName, usageKey, {
+          includeInatSynonymCheck: true,
+        });
         if (fallbackPhoto) {
           const fallbackFound: InatTaxonFetchOutcome = {
             status: 'FOUND',
@@ -2851,6 +3423,7 @@ export async function fetchInatTaxon(
               photoAttribution: fallbackPhoto.photoAttribution,
               photoSource: fallbackPhoto.photoSource,
               summary: includeSummary ? '' : undefined,
+              inatUrl: fallbackPhoto.inatUrl,
               fallbackCheckedWithKey: usageKey,
             },
           };
@@ -2858,7 +3431,7 @@ export async function fetchInatTaxon(
           return fallbackFound;
         }
         const notFound: InatTaxonFetchOutcome = { status: 'NOT_FOUND' };
-        setCached(notFoundKey, notFound, 10 * 60 * 1000);
+        setCached(notFoundKey, notFound, 3 * 60 * 1000);
         return notFound;
       }
 
@@ -2895,14 +3468,16 @@ export async function fetchInatTaxon(
       let photoAttribution: string | undefined = taxon.default_photo?.attribution;
       let photoSource: string | undefined = photoUrl ? 'iNaturalist' : undefined;
 
-      if (photoUrl && (!isUsableImageThumbnailUrl(photoUrl) || (!skipFallbackPhoto && !(await verifyImageAssetUrl(photoUrl, 3500)).verified))) {
+      if (photoUrl && (!isUsableImageThumbnailUrl(photoUrl) || (!skipFallbackPhoto && !(await verifyImageAssetUrl(photoUrl, 5000)).verified))) {
         photoUrl = undefined;
         photoAttribution = undefined;
         photoSource = undefined;
       }
 
       if (!photoUrl && !skipFallbackPhoto) {
-        const fallbackPhoto = await fetchVerifiedFallbackPhoto(scientificName, usageKey);
+        const fallbackPhoto = await fetchVerifiedFallbackPhoto(scientificName, usageKey, {
+          includeInatSynonymCheck: false,
+        });
         if (fallbackPhoto) {
           photoUrl = fallbackPhoto.photoUrl;
           photoAttribution = fallbackPhoto.photoAttribution;
@@ -2930,8 +3505,8 @@ export async function fetchInatTaxon(
         },
       };
 
-      // Eğer mevcut önbellekte summary varsa lite çağrısı onu ezmesin
-      if (includeSummary || !cachedOutcome || cachedOutcome.status !== 'FOUND') {
+      // Eğer mevcut önbellekte summary varsa lite çağrısı onu ezmesin; fotoğrafı boşsa yalnızca fallback kontrol edilmişse önbelleğe yaz
+      if ((includeSummary || !cachedOutcome || cachedOutcome.status !== 'FOUND') && (photoUrl || !skipFallbackPhoto)) {
         setCached(cacheKey, found, 30 * 60 * 1000);
       }
       return found;
@@ -8259,6 +8834,7 @@ export async function enrichDiscoveryPageItems(
 
   const working = items.map((item) => ({ ...item }));
   const completedKeys = new Set<number>();
+  const phase1OutcomeByKey = new Map<number, InatTaxonFetchOutcome['status']>();
   const getItemKey = (it: DiscoveredSpeciesItem) => it.acceptedUsageKey || it.usageKey;
 
   // Phase 1: Hızlı iNaturalist sorgusu (fallback görsel zinciri olmadan, concurrency=3)
@@ -8269,6 +8845,7 @@ export async function enrichDiscoveryPageItems(
       usageKey: getItemKey(item),
       skipFallbackPhoto: true,
     });
+    phase1OutcomeByKey.set(getItemKey(item), outcome.status);
     if (shouldCancel?.()) return;
     if (outcome.status === 'FOUND') {
       const inat = outcome.data;
@@ -8298,7 +8875,7 @@ export async function enrichDiscoveryPageItems(
     .filter((u): u is string => Boolean(u));
 
   if (candidateUrls.length > 0) {
-    const verificationMap = await verifyImageAssetUrlsBatch(candidateUrls, 7000);
+    const verificationMap = await verifyImageAssetUrlsBatch(candidateUrls, 15000);
     if (shouldCancel?.()) return working;
 
     for (const item of working) {
@@ -8316,7 +8893,7 @@ export async function enrichDiscoveryPageItems(
 
   onUpdate?.(working.map((w) => ({ ...w })), new Set(completedKeys));
 
-  // Phase 2: Hâlâ doğrulanmış görseli olmayan türler için Wikipedia (HTTP 200) / GBIF StillImage yedeği (sınırlı eşzamanlılık=2)
+  // Phase 2: Hâlâ doğrulanmış görseli olmayan türler için toplu Wikipedia + GBIF Species/Occurrence Media + Commons yedeği
   const missingPhotoItems = working.filter((item) => !item.photoUrl);
   if (missingPhotoItems.length === 0) {
     for (const item of working) completedKeys.add(getItemKey(item));
@@ -8324,16 +8901,29 @@ export async function enrichDiscoveryPageItems(
     return working;
   }
 
-  await runWithConcurrencyLimit(missingPhotoItems, 2, async (item) => {
+  const wikiBatch = await fetchBatchWikipediaThumbnails(missingPhotoItems.map((i) => i.canonicalName));
+  if (shouldCancel?.()) return working;
+
+  await runWithConcurrencyLimit(missingPhotoItems, 4, async (item) => {
     const key = getItemKey(item);
     if (shouldCancel?.()) return;
     try {
-      const fallback = await fetchVerifiedFallbackPhoto(item.canonicalName, key);
+      const cleanLower = normalizeSearchQuery(item.canonicalName).toLowerCase();
+      const preloadedWikiThumb = wikiBatch.map.get(cleanLower) ?? null;
+      const phase1Status = phase1OutcomeByKey.get(key);
+      const fallback = await fetchVerifiedFallbackPhoto(item.canonicalName, key, {
+        includeInatSynonymCheck: phase1Status === 'ERROR',
+        skipWikiQuery: !wikiBatch.hadError,
+        preloadedWikiThumb,
+      });
       if (shouldCancel?.()) return;
       if (fallback) {
         item.photoUrl = fallback.photoUrl;
         item.photoAttribution = fallback.photoAttribution;
         item.photoSource = fallback.photoSource;
+        if (fallback.inatUrl && !item.inaturalistUrl) {
+          item.inaturalistUrl = fallback.inatUrl;
+        }
         if (!item.inaturalistUrl) {
           item.dataSource = `GBIF Backbone + ${fallback.photoSource}`;
         }

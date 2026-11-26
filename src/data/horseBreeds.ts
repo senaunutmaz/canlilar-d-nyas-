@@ -1,5 +1,5 @@
 import { HorseBreedRecord } from '../types/biodiversity';
-import { verifyImageAssetUrlsBatch } from '../services/gbif';
+import { verifyImageAssetUrlsBatch, isTransientMediaVerifyFailure } from '../services/gbif';
 
 /**
  * Doğrulanmış açık erişim kaynaklarına (Wikipedia / ırk kayıtları) dayalı Equus caballus at ırkları kataloğu.
@@ -519,7 +519,7 @@ export async function fetchVerifiedHorseBreedPhotos(
 
       const candidateUrls = Array.from(candidateUrlsBySlug.values()).map((c) => c.url);
       if (candidateUrls.length > 0) {
-        const verifiedMap = await verifyImageAssetUrlsBatch(candidateUrls, 8000);
+        const verifiedMap = await verifyImageAssetUrlsBatch(candidateUrls, 15000);
         for (const [slug, cand] of candidateUrlsBySlug.entries()) {
           const check = verifiedMap.get(cand.url);
           if (check?.verified) {
@@ -529,7 +529,7 @@ export async function fetchVerifiedHorseBreedPhotos(
               sourceTitle: cand.title,
               expiresAt: Date.now() + 30 * 60 * 1000,
             });
-          } else {
+          } else if (!isTransientMediaVerifyFailure(check)) {
             BREED_PHOTO_CACHE.set(slug, {
               photoUrl: '',
               sourceTitle: cand.title,
