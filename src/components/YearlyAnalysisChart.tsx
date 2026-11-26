@@ -38,11 +38,13 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
   if (!yearlyStats || yearlyStats.length === 0) {
     const hasRecordsWithoutDates = typeof totalRecords === 'number' && totalRecords > 0;
     return (
-      <div id="analiz" className="bg-[#111e17] border border-emerald-900/60 rounded-2xl p-6 lg:p-8 text-center text-emerald-300/75 h-full flex flex-col items-center justify-center">
-        <BarChart3 className="w-10 h-10 mx-auto mb-3 opacity-50 text-emerald-400" />
-        <h3 className="text-base font-bold text-white mb-1.5">Yıllık Dağılım Oluşturulamadı</h3>
+      <div id="analiz" className="bg-white border border-[#D6E4DC] rounded-2xl p-6 lg:p-8 text-center text-[#556B62] h-full flex flex-col items-center justify-center shadow-sm">
+        <div className="w-12 h-12 rounded-2xl bg-[#F5F9F4] border border-[#D6E4DC] flex items-center justify-center mb-3 text-[#247A63]">
+          <BarChart3 className="w-6 h-6" />
+        </div>
+        <h3 className="text-base font-bold text-[#1E332B] mb-1.5">Yıllık Dağılım Oluşturulamadı</h3>
         {hasRecordsWithoutDates ? (
-          <p className="text-xs leading-relaxed max-w-md text-amber-200/90">
+          <p className="text-xs leading-relaxed max-w-md text-[#6E4716]">
             GBIF arşivinde <strong>{totalRecords.toLocaleString('tr-TR')}</strong> adet kayıt bulundu; ancak{' '}
             {typeof missingYearCount === 'number' && missingYearCount > 0
               ? `${missingYearCount.toLocaleString('tr-TR')} kaydın yıl/tarih bilgisi eksik`
@@ -51,7 +53,7 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
             olduğundan kronolojik grafik çizilemedi.
           </p>
         ) : (
-          <p className="text-xs text-emerald-300/60">
+          <p className="text-xs text-[#556B62]">
             Bu türe ait seçili kapsamda yıllara göre arşivlenmiş gözlem verisi bulunamadı.
           </p>
         )}
@@ -101,16 +103,16 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
         : 'Tüm Arşiv Yılları';
 
   return (
-    <div id="analiz" className="bg-[#111e17] border border-emerald-900/60 rounded-2xl p-6 lg:p-8 shadow-xl h-full flex flex-col justify-between">
+    <div id="analiz" className="bg-white border border-[#D6E4DC] rounded-2xl p-6 lg:p-8 shadow-sm h-full flex flex-col justify-between">
       <div>
         {/* Header and Controls */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 pb-4 border-b border-emerald-900/40">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 pb-4 border-b border-[#E6EFEA]">
           <div>
-            <h3 className="text-xl font-bold text-white flex items-center gap-2">
-              <BarChart3 className="w-5 h-5 text-emerald-400" />
+            <h3 className="text-xl font-bold text-[#1E332B] flex items-center gap-2">
+              <BarChart3 className="w-5 h-5 text-[#247A63]" />
               <span>Yıllara Göre Gözlem Dağılımı</span>
             </h3>
-            <p className="text-xs text-emerald-300/70 mt-1">
+            <p className="text-xs text-[#556B62] mt-1">
               {isArchiveFacetCalculated
                 ? 'GBIF tüm arşiv YEAR fasetinden alınan gerçek tarihli kayıtların kronolojik grafiği'
                 : 'Tarih bilgisi bulunan gözlemlerin kronolojik grafiği'}
@@ -118,7 +120,7 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
           </div>
 
           {/* Time Window Buttons */}
-          <div className="flex items-center gap-1 p-1 bg-[#0b1510] rounded-xl border border-emerald-800/40 shrink-0">
+          <div className="flex items-center gap-1 p-1 bg-[#F5F9F4] rounded-xl border border-[#D6E4DC] shrink-0">
             <button
               type="button"
               onClick={() => {
@@ -127,8 +129,8 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
               }}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
                 timeFilter === 'all'
-                  ? 'bg-emerald-600 text-white shadow-sm'
-                  : 'text-emerald-300/70 hover:text-white'
+                  ? 'bg-[#247A63] text-white shadow-xs'
+                  : 'text-[#556B62] hover:text-[#1E332B]'
               }`}
             >
               Tüm Yıllar ({yearlyStats.length})
@@ -141,8 +143,8 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
               }}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
                 timeFilter === 'recent20'
-                  ? 'bg-emerald-600 text-white shadow-sm'
-                  : 'text-emerald-300/70 hover:text-white'
+                  ? 'bg-[#247A63] text-white shadow-xs'
+                  : 'text-[#556B62] hover:text-[#1E332B]'
               }`}
             >
               Son 20 Yıl
@@ -155,8 +157,8 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
               }}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
                 timeFilter === 'recent10'
-                  ? 'bg-emerald-600 text-white shadow-sm'
-                  : 'text-emerald-300/70 hover:text-white'
+                  ? 'bg-[#247A63] text-white shadow-xs'
+                  : 'text-[#556B62] hover:text-[#1E332B]'
               }`}
             >
               Son 10 Yıl
@@ -164,43 +166,43 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
           </div>
         </div>
 
-        {/* KPI Cards: Peak Year, Earliest vs Lowest Year, Total Dated vs Archive */}
+        {/* KPI Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-8">
           {/* Peak Year */}
-          <div className="bg-[#0b1510]/80 p-4 rounded-xl border border-emerald-800/30 flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+          <div className="bg-[#F5F9F4] p-4 rounded-xl border border-[#D6E4DC] flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-[#DDEFE3] text-[#247A63] flex items-center justify-center shrink-0">
               <Award className="w-5 h-5" />
             </div>
             <div>
-              <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400/80 block">
+              <span className="text-[11px] font-mono uppercase tracking-wider text-[#247A63] font-semibold block">
                 Zirve Yıl (En Çok)
               </span>
-              <div className="text-xl font-bold font-mono text-white tabular-nums">
+              <div className="text-xl font-bold font-mono text-[#1E332B] tabular-nums">
                 {peakYear ? `${peakYear.year}` : '—'}
-                <span className="text-xs font-normal text-emerald-300/80 ml-2">
+                <span className="text-xs font-normal text-[#556B62] ml-2">
                   ({peakYear ? `${peakYear.count.toLocaleString('tr-TR')} kayıt` : ''})
                 </span>
               </div>
             </div>
           </div>
 
-          {/* Earliest Year & Lowest Year cleanly separated */}
-          <div className="bg-[#0b1510]/80 p-4 rounded-xl border border-emerald-800/30 flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+          {/* Earliest Year & Lowest Year */}
+          <div className="bg-[#FDF6EC] p-4 rounded-xl border border-[#F3D9B5] flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-[#F3D9B5]/60 text-[#9A631A] flex items-center justify-center shrink-0">
               <Calendar className="w-5 h-5" />
             </div>
             <div className="min-w-0">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-amber-400/80 block">
+              <span className="text-[11px] font-mono uppercase tracking-wider text-[#9A631A] font-semibold block">
                 İlk Kayıt Yılı
               </span>
-              <div className="text-xl font-bold font-mono text-white tabular-nums">
+              <div className="text-xl font-bold font-mono text-[#1E332B] tabular-nums">
                 {resolvedEarliest ? `${resolvedEarliest.year}` : '—'}
-                <span className="text-xs font-normal text-amber-300/80 ml-2">
+                <span className="text-xs font-normal text-[#6E4716] ml-2">
                   ({resolvedEarliest ? `${resolvedEarliest.count.toLocaleString('tr-TR')} kayıt` : ''})
                 </span>
               </div>
               {lowestYear && (
-                <span className="text-[10px] font-mono text-emerald-300/60 block truncate">
+                <span className="text-[10px] font-mono text-[#6E4716]/80 block truncate">
                   En az kayıt: {lowestYear.year} ({lowestYear.count.toLocaleString('tr-TR')})
                 </span>
               )}
@@ -208,22 +210,22 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
           </div>
 
           {/* Active Inspection Total */}
-          <div className="bg-[#0b1510]/80 p-4 rounded-xl border border-emerald-800/30 flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-teal-500/20 text-teal-400 flex items-center justify-center shrink-0">
+          <div className="bg-[#ECF6FA] p-4 rounded-xl border border-[#B9DDEB] flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-[#B9DDEB]/60 text-[#1B6884] flex items-center justify-center shrink-0">
               <TrendingUp className="w-5 h-5" />
             </div>
             <div className="min-w-0">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-teal-400/80 block">
+              <span className="text-[11px] font-mono uppercase tracking-wider text-[#1B6884] font-semibold block">
                 Tarihli Kayıt (Dönem)
               </span>
-              <div className="text-xl font-bold font-mono text-white tabular-nums">
+              <div className="text-xl font-bold font-mono text-[#1E332B] tabular-nums">
                 {totalObsInView.toLocaleString('tr-TR')}
-                <span className="text-xs font-normal text-teal-300/80 ml-2">
+                <span className="text-xs font-normal text-[#556B62] ml-2">
                   kayıt
                 </span>
               </div>
               {typeof totalRecords === 'number' && totalRecords > 0 && (
-                <span className="text-[10px] font-mono text-emerald-300/60 block truncate">
+                <span className="text-[10px] font-mono text-[#556B62] block truncate">
                   Toplam arşiv: {totalRecords.toLocaleString('tr-TR')}
                   {typeof missingYearCount === 'number' && missingYearCount > 0
                     ? ` · Tarihsiz: ${missingYearCount.toLocaleString('tr-TR')}`
@@ -236,18 +238,18 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
 
         {/* Interactive Bar Chart Stage OR Safe Empty Time-Window State */}
         {!hasDisplayedData ? (
-          <div className="py-14 px-6 rounded-xl bg-[#0b1510]/60 border border-emerald-900/40 text-center">
-            <Calendar className="w-8 h-8 mx-auto mb-2.5 text-amber-400/70" />
-            <p className="text-sm font-semibold text-white mb-1">
+          <div className="py-14 px-6 rounded-xl bg-[#F5F9F4] border border-[#D6E4DC] text-center">
+            <Calendar className="w-8 h-8 mx-auto mb-2.5 text-[#9A631A]" />
+            <p className="text-sm font-semibold text-[#1E332B] mb-1">
               {filterLabel} aralığında kayıtlı gözlem bulunamadı
             </p>
-            <p className="text-xs text-emerald-300/70 mb-4">
+            <p className="text-xs text-[#556B62] mb-4">
               Bu tür için GBIF arşivindeki en güncel kayıt yılı {yearlyStats[yearlyStats.length - 1]?.year} olarak görünmektedir ({allDatedTotal.toLocaleString('tr-TR')} tarihli kayıt).
             </p>
             <button
               type="button"
               onClick={() => setTimeFilter('all')}
-              className="px-4 py-2 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors cursor-pointer"
+              className="px-4 py-2 text-xs font-bold rounded-lg bg-[#247A63] hover:bg-[#1D6350] text-white transition-colors cursor-pointer"
             >
               Tüm Arşiv Yıllarını Göster ({yearlyStats.length} yıl)
             </button>
@@ -257,26 +259,26 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
             {/* Active Hover Monospace Tooltip HUD */}
             <div className="h-8 mb-2 flex items-center justify-between text-xs font-mono gap-2">
               {hoveredYear ? (
-                <div className="text-emerald-300 font-semibold bg-emerald-950/80 border border-emerald-700/60 px-3 py-1 rounded-md">
-                  Yıl: <span className="text-white">{hoveredYear.year}</span> — Gözlem Kaydı:{' '}
-                  <span className="text-white tabular-nums">{hoveredYear.count.toLocaleString('tr-TR')} adet</span> (
+                <div className="text-[#1E332B] font-semibold bg-[#DDEFE3] border border-[#8CCFB0] px-3 py-1 rounded-md">
+                  Yıl: <span className="text-[#247A63] font-bold">{hoveredYear.year}</span> — Gözlem Kaydı:{' '}
+                  <span className="text-[#1E332B] font-bold tabular-nums">{hoveredYear.count.toLocaleString('tr-TR')} adet</span> (
                   {totalObsInView > 0 ? `%${((hoveredYear.count / totalObsInView) * 100).toFixed(1)}` : '%0'})
                 </div>
               ) : (
-                <div className="text-emerald-400/60 text-[11px]">
+                <div className="text-[#556B62] text-[11px]">
                   Sütunların üzerine gelerek 4 haneli yıl ve kayıt sayısını inceleyin
                 </div>
               )}
-              <span className="text-emerald-400/60 text-[11px] shrink-0">
+              <span className="text-[#556B62] text-[11px] shrink-0">
                 Maksimum: {maxCount.toLocaleString('tr-TR')} kayıt
               </span>
             </div>
 
             {/* The Bars Container */}
-            <div className="relative h-56 w-full flex items-end gap-[2px] sm:gap-1 px-1 pt-4 border-b border-emerald-800/40">
+            <div className="relative h-56 w-full flex items-end gap-[2px] sm:gap-1 px-1 pt-4 border-b border-[#D6E4DC]">
               {/* Subtle horizontal grid lines */}
-              <div className="absolute inset-x-0 top-4 border-t border-dashed border-emerald-900/40 pointer-events-none" />
-              <div className="absolute inset-x-0 top-1/2 border-t border-dashed border-emerald-900/30 pointer-events-none" />
+              <div className="absolute inset-x-0 top-4 border-t border-dashed border-[#D6E4DC] pointer-events-none" />
+              <div className="absolute inset-x-0 top-1/2 border-t border-dashed border-[#E6EFEA] pointer-events-none" />
 
               {displayedStats.map((item) => {
                 const heightPercent =
@@ -298,10 +300,10 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
                       style={{ height: `${heightPercent}%` }}
                       className={`w-full max-w-[28px] rounded-t-sm transition-all duration-150 ${
                         isPeak
-                          ? 'bg-gradient-to-t from-emerald-600 to-amber-400 shadow-md shadow-amber-500/20 ring-1 ring-amber-300/50'
+                          ? 'bg-gradient-to-t from-[#247A63] to-[#D97706] shadow-xs ring-1 ring-[#D97706]/40'
                           : isHovered
-                          ? 'bg-emerald-400 ring-2 ring-emerald-300'
-                          : 'bg-emerald-600/70 group-hover:bg-emerald-500'
+                          ? 'bg-[#247A63] ring-2 ring-[#8CCFB0]'
+                          : 'bg-[#8CCFB0] group-hover:bg-[#247A63]'
                       }`}
                     />
                   </div>
@@ -310,11 +312,11 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
             </div>
 
             {/* Çakışmasız 4 Haneli Yıl Etiketleri Satırı */}
-            <div className="mt-2.5 flex items-center justify-between gap-2 text-[11px] font-mono text-emerald-300/75 tabular-nums">
+            <div className="mt-2.5 flex items-center justify-between gap-2 text-[11px] font-mono text-[#556B62] tabular-nums">
               {xTicks.map((tick) => (
                 <span
                   key={tick.year}
-                  className={peakYear && tick.year === peakYear.year ? 'text-amber-300 font-bold' : ''}
+                  className={peakYear && tick.year === peakYear.year ? 'text-[#9A631A] font-bold' : ''}
                 >
                   {tick.year}
                 </span>
@@ -322,7 +324,7 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
             </div>
 
             {/* X-axis Caption */}
-            <div className="mt-2 flex items-center justify-between text-[11px] font-mono text-emerald-400/60">
+            <div className="mt-2 flex items-center justify-between text-[11px] font-mono text-[#556B62]">
               <span>{displayedStats[0].year} – {displayedStats[displayedStats.length - 1].year}</span>
               <span>{displayedStats.length} farklı yıl ({filterLabel})</span>
             </div>
@@ -332,30 +334,30 @@ export const YearlyAnalysisChart: React.FC<YearlyAnalysisChartProps> = ({
 
       {/* Tarihsiz Kayıt & Faset Sınırı Açıklama Kutusu */}
       {(isYearFacetTruncated || invalidYearCount > 0 || typeof missingYearCount === 'number' || missingYearCount === null) && (
-        <div className="mt-5 pt-4 border-t border-emerald-900/40 flex flex-col gap-1.5 text-[11px] text-emerald-200/75">
+        <div className="mt-5 pt-4 border-t border-[#E6EFEA] flex flex-col gap-1.5 text-[11px] text-[#556B62]">
           {typeof missingYearCount === 'number' && missingYearCount > 0 && (
-            <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-[#0b1510]/80 border border-emerald-800/30">
-              <span className="flex items-center gap-2">
-                <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-[#F5F9F4] border border-[#D6E4DC]">
+              <span className="flex items-center gap-2 text-[#1E332B]">
+                <AlertCircle className="w-3.5 h-3.5 text-[#9A631A] shrink-0" />
                 <span>Tarih / yıl bilgisi bulunmayan kayıtlar (grafiğe sahte yıl olarak eklenmedi)</span>
               </span>
-              <strong className="font-mono text-amber-300 tabular-nums shrink-0">
+              <strong className="font-mono text-[#9A631A] tabular-nums shrink-0">
                 {missingYearCount.toLocaleString('tr-TR')} kayıt
               </strong>
             </div>
           )}
           {missingYearCount === null && (
-            <div className="px-3 py-2 rounded-lg bg-amber-950/30 border border-amber-700/40 text-amber-200">
+            <div className="px-3 py-2 rounded-lg bg-[#FDF6EC] border border-[#F3D9B5] text-[#6E4716]">
               Faset sınırı veya örneklem farkı nedeniyle tarihsiz kayıt sayısı toplam arşivden kesin olarak izole edilemedi.
             </div>
           )}
           {invalidYearCount > 0 && (
-            <div className="px-3 py-2 rounded-lg bg-amber-950/30 border border-amber-700/40 text-amber-200">
+            <div className="px-3 py-2 rounded-lg bg-[#FDF6EC] border border-[#F3D9B5] text-[#6E4716]">
               {invalidYearCount.toLocaleString('tr-TR')} kayıt geçersiz/aralık dışı tarih (1500 öncesi veya gelecek yıl) içerdiği için grafik dışı bırakıldı.
             </div>
           )}
           {isYearFacetTruncated && (
-            <div className="px-3 py-2 rounded-lg bg-amber-950/30 border border-amber-700/40 text-amber-200">
+            <div className="px-3 py-2 rounded-lg bg-[#FDF6EC] border border-[#F3D9B5] text-[#6E4716]">
               Uyarı: GBIF YEAR faseti sorgu limitine ulaştığı için dönemsel verinin bir kısmı kesilmiş olabilir.
             </div>
           )}

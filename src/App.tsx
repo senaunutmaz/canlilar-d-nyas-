@@ -13,8 +13,10 @@ import { MapPage } from './pages/MapPage';
 import { AnalysisPage } from './pages/AnalysisPage';
 import { ComparePage } from './pages/ComparePage';
 import { ConservationPage } from './pages/ConservationPage';
+import { HorseBreedDetailPage } from './pages/HorseBreedDetailPage';
 
 import { fetchSpeciesAnalysis, resolveSearchIntent } from './services/gbif';
+import { isHorseBreedCatalogQuery, resolveHorseBreedQuery } from './data/horseBreeds';
 import { SpeciesAnalysis, SearchErrorType } from './types/biodiversity';
 
 const STORAGE_SPECIES_KEY = 'canli_atlasi_species';
@@ -59,7 +61,7 @@ function MainRouter() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isLoadingSecondary, setIsLoadingSecondary] = useState<boolean>(false);
   const [activeCountry, setActiveCountry] = useState<string>(() => readStoredValue(STORAGE_COUNTRY_KEY, 'TR'));
-  const [lastSpeciesName, setLastSpeciesName] = useState<string>(() => readStoredValue(STORAGE_SPECIES_KEY, 'Ursus arctos'));
+  const [lastSpeciesName, setLastSpeciesName] = useState<string>(() => readStoredValue(STORAGE_SPECIES_KEY, ''));
   const [lastCommonName, setLastCommonName] = useState<string>(() => readStoredValue(STORAGE_COMMON_NAME_KEY, ''));
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [errorType, setErrorType] = useState<SearchErrorType | null>(null);
@@ -82,7 +84,7 @@ function MainRouter() {
   useEffect(() => {
     const countryParam = searchParams.get('country');
 
-    if (location.pathname === '/kesfet') {
+    if (location.pathname === '/kesfet' || location.pathname.startsWith('/at-irklari')) {
       if (countryParam !== null && countryParam !== activeCountry) {
         setActiveCountry(countryParam);
       }
@@ -122,9 +124,15 @@ function MainRouter() {
       return;
     }
 
-    // Species view pages (/analiz, /harita, /karsilastir) without ?species= param
+    // Species view pages (/analiz, /harita, /karsilastir) without ?species= param:
+    // Yalnızca oturumda önceden seçilmiş/aranmış bir tür varsa yükle; aksi halde gereksiz GBIF sorgusu başlatma.
     if (isSpeciesViewRoute) {
-      const targetSpecies = primaryAnalysis?.species.canonicalName || primaryAnalysis?.species.scientificName || lastSpeciesName || 'Ursus arctos';
+      const targetSpecies =
+        primaryAnalysis?.species.canonicalName ||
+        primaryAnalysis?.species.scientificName ||
+        lastSpeciesName;
+      if (!targetSpecies) return;
+
       const activeCommon =
         targetSpecies.toLowerCase() === lastSpeciesName.toLowerCase() ? lastCommonName : '';
       if (primaryAnalysis && primaryAnalysis.countryCode === targetCountry) {
@@ -141,19 +149,6 @@ function MainRouter() {
       }
       return;
     }
-
-    // Initial background preload on HomePage if nothing loaded yet
-    if (location.pathname === '/' && !primaryAnalysis && !isLoading && !errorMessage && searchSeqRef.current === 0) {
-      const initialSpecies = lastSpeciesName || 'Ursus arctos';
-      const initialCommon =
-        initialSpecies.toLowerCase() === lastSpeciesName.toLowerCase() ? lastCommonName : '';
-      executeSearch(initialSpecies, targetCountry, {
-        updateUrl: false,
-        navigateToAnalysis: false,
-        commonName: initialCommon,
-        clearCommonName: !initialCommon,
-      });
-    }
   }, [location.pathname, searchParams]);
 
   const executeSearch = async (
@@ -165,6 +160,32 @@ function MainRouter() {
     if (!cleanQuery) return;
 
     const { updateUrl = true, navigateToAnalysis = false, commonName, clearCommonName = false } = options;
+
+    // Belirli bir at ırkı adı arandıysa (ör. "Arap Atı", "Akhal-Teke", "Frizyen Atı") doğrudan ırk detay sayfasına yönlendir
+    const matchedBreed = resolveHorseBreedQuery(cleanQuery);
+    if (matchedBreed) {
+      inFlightKeyRef.current = null;
+      setIsLoading(false);
+      setErrorMessage(null);
+      setErrorType(null);
+      setActiveCountry(country);
+      writeStoredSelection(lastSpeciesName, country, lastCommonName);
+      navigate(`/at-irklari/${matchedBreed.slug}?country=${encodeURIComponent(country)}`);
+      return;
+    }
+
+    // "At" araması yapıldığında Equus caballus analizine değil "At Irkları" keşif kataloğuna yönlendir
+    if (isHorseBreedCatalogQuery(cleanQuery)) {
+      inFlightKeyRef.current = null;
+      setIsLoading(false);
+      setErrorMessage(null);
+      setErrorType(null);
+      setActiveCountry(country);
+      writeStoredSelection(lastSpeciesName, country, lastCommonName);
+      navigate(`/kesfet?q=${encodeURIComponent(cleanQuery)}&country=${encodeURIComponent(country)}`);
+      return;
+    }
+
     const preferredCommonName = commonName?.trim()
       ? commonName.trim()
       : !clearCommonName && cleanQuery.toLowerCase() === lastSpeciesName.toLowerCase()
@@ -290,15 +311,18 @@ function MainRouter() {
 
   const handleCountryChange = (nextCountry: string) => {
     setActiveCountry(nextCountry);
-    if (location.pathname === '/kesfet') {
+    if (location.pathname === '/kesfet' || location.pathname.startsWith('/at-irklari')) {
       writeStoredSelection(lastSpeciesName, nextCountry, lastCommonName);
       return;
     }
     const targetQuery =
       primaryAnalysis?.species?.canonicalName ||
       primaryAnalysis?.species?.scientificName ||
-      lastSpeciesName ||
-      'Ursus arctos';
+      lastSpeciesName;
+    if (!targetQuery) {
+      writeStoredSelection('', nextCountry, '');
+      return;
+    }
     const preservedCommonName =
       targetQuery.toLowerCase() === lastSpeciesName.toLowerCase() ? lastCommonName : '';
     executeSearch(targetQuery, nextCountry, {
@@ -352,11 +376,12 @@ function MainRouter() {
     primaryAnalysis?.species?.scientificName ||
     lastSpeciesName;
 
-  const isInitialAutoLoading = isSpeciesViewRoute && !primaryAnalysis && !errorMessage;
+  const hasRequestedSpecies = Boolean(searchParams.get('species')?.trim() || lastSpeciesName);
+  const isInitialAutoLoading = isSpeciesViewRoute && hasRequestedSpecies && !primaryAnalysis && !errorMessage;
   const effectiveSpeciesViewLoading = isLoading || isInitialAutoLoading;
 
   return (
-    <div className="min-h-screen bg-[#0b1510] text-[#e8f0ec] flex flex-col font-sans selection:bg-emerald-600 selection:text-white">
+    <div className="min-h-screen bg-[#F5F9F4] text-[#1E332B] flex flex-col font-sans selection:bg-[#247A63] selection:text-white">
       {/* Navigation Bar */}
       <Navbar
         onQuickSearch={(query) => executeSearch(query, activeCountry, { updateUrl: true, navigateToAnalysis: true, clearCommonName: true })}
@@ -451,6 +476,31 @@ function MainRouter() {
                 activeCountry={activeCountry}
               />
             }
+          />
+          <Route
+            path="/at-irklari"
+            element={
+              <ExplorePage
+                defaultQuery="At"
+                onSelectSpecies={(sciName, country, turkishName) => {
+                  executeSearch(sciName, country, {
+                    updateUrl: true,
+                    navigateToAnalysis: true,
+                    commonName: turkishName,
+                    clearCommonName: !turkishName,
+                  });
+                }}
+                activeCountry={activeCountry}
+                onCountryChange={(c) => {
+                  setActiveCountry(c);
+                  writeStoredSelection(lastSpeciesName, c, lastCommonName);
+                }}
+              />
+            }
+          />
+          <Route
+            path="/at-irklari/:breedSlug"
+            element={<HorseBreedDetailPage activeCountry={activeCountry} />}
           />
           <Route
             path="/koruma"

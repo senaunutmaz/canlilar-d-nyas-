@@ -1,23 +1,27 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { TaxonGroupExplorer } from '../components/TaxonGroupExplorer';
+import { HorseBreedsExplorer } from '../components/HorseBreedsExplorer';
+import { isHorseBreedCatalogQuery, resolveHorseBreedQuery } from '../data/horseBreeds';
 import { Search, Compass, ArrowRight } from 'lucide-react';
 
 interface ExplorePageProps {
   onSelectSpecies: (scientificName: string, country: string, turkishName?: string) => void;
   activeCountry: string;
   onCountryChange: (country: string) => void;
+  defaultQuery?: string;
 }
 
 export const ExplorePage: React.FC<ExplorePageProps> = ({
   onSelectSpecies,
   activeCountry,
   onCountryChange,
+  defaultQuery = '',
 }) => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
 
-  const urlQuery = searchParams.get('q')?.trim() || 'Kuş';
+  const urlQuery = searchParams.get('q')?.trim() || defaultQuery;
   const urlCountry = searchParams.get('country');
   const effectiveCountry = urlCountry !== null ? urlCountry : activeCountry;
 
@@ -32,45 +36,50 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const clean = inputQuery.trim();
-    if (clean) {
-      setActiveQuery(clean);
-      setSearchParams({ q: clean, country: effectiveCountry });
+    if (!clean) return;
+    const matchedBreed = resolveHorseBreedQuery(clean);
+    if (matchedBreed) {
+      navigate(`/at-irklari/${matchedBreed.slug}?country=${encodeURIComponent(effectiveCountry)}`);
+      return;
     }
+    setActiveQuery(clean);
+    setSearchParams({ q: clean, country: effectiveCountry });
   };
 
-  const quickGroups = ['Kuş', 'Memeli', 'Böcek', 'Kelebek', 'Balık', 'Yılan', 'Sürüngen', 'Kurbağa', 'Örümcek', 'Tilki', 'Kurt', 'Kedi', 'Ayı', 'Baykuş', 'Yunus'];
+  const quickGroups = ['Kuş', 'Memeli', 'Böcek', 'Kelebek', 'Balık', 'Yılan', 'Sürüngen', 'Kurbağa', 'Örümcek', 'Tilki', 'Kurt', 'Kedi', 'Ayı', 'Baykuş', 'Yunus', 'At'];
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
       {/* Top Search & Category Bar */}
-      <div className="bg-[#111e17] rounded-3xl p-6 sm:p-8 border border-emerald-800/50 shadow-2xl">
+      <div className="bg-white rounded-3xl p-6 sm:p-8 border border-[#D6E4DC] shadow-sm">
         <div className="max-w-3xl mx-auto text-center mb-6">
-          <div className="inline-flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-emerald-400 mb-2 bg-emerald-950/80 px-3 py-1 rounded-full border border-emerald-800/40">
+          <div className="inline-flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-[#247A63] font-semibold mb-2">
             <Compass className="w-3.5 h-3.5" />
             <span>Tüm Animalia Alemi Dinamik Keşif</span>
           </div>
-          <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight mb-3">
+          <h1 className="text-3xl sm:text-4xl font-extrabold text-[#1E332B] tracking-tight mb-3">
             Canlı Türleri Keşif Alanı
           </h1>
-          <p className="text-sm text-emerald-100/75 leading-relaxed">
+          <p className="text-sm text-[#556B62] leading-relaxed">
             Arama alanına herhangi bir hayvan grubu (ör. <em>Kelebek, Kuş, Böcek, Balık, Memeli, Sürüngen...</em>) veya cins/tür adı yazarak GBIF Backbone hiyerarşisinde gerçek zamanlı keşif yapın.
           </p>
         </div>
 
-        <form onSubmit={handleSearchSubmit} className="max-w-2xl mx-auto flex items-center gap-2 bg-[#0b1510] p-2.5 rounded-2xl border border-emerald-700/50 shadow-lg">
+        <form onSubmit={handleSearchSubmit} className="max-w-2xl mx-auto flex items-center gap-2 bg-[#F5F9F4] p-2 rounded-2xl border border-[#D6E4DC] shadow-2xs">
           <div className="relative flex-1 flex items-center">
-            <Search className="w-5 h-5 text-emerald-400 absolute left-4 pointer-events-none" />
+            <Search className="w-5 h-5 text-[#247A63] absolute left-4 pointer-events-none" />
             <input
               type="text"
               value={inputQuery}
               onChange={(e) => setInputQuery(e.target.value)}
               placeholder="Hayvan grubu veya tür adı yazın (örn: Kelebek, Kuş, Kurt, Balık...)"
-              className="w-full pl-11 pr-4 py-3 bg-transparent text-white placeholder-emerald-100/40 text-sm focus:outline-none font-medium"
+              className="w-full pl-11 pr-4 py-3 bg-transparent text-[#1E332B] placeholder-[#556B62]/65 text-sm focus:outline-none font-medium"
             />
           </div>
           <button
             type="submit"
-            className="px-6 py-3 bg-emerald-500 hover:bg-emerald-400 text-[#0b1510] font-bold text-sm rounded-xl transition-all shadow-md flex items-center gap-2 shrink-0 cursor-pointer"
+            disabled={!inputQuery.trim()}
+            className="px-6 py-3 bg-[#247A63] hover:bg-[#1D6350] disabled:bg-[#DDEFE3] disabled:text-[#556B62] text-white font-bold text-sm rounded-xl transition-all shadow-xs flex items-center gap-2 shrink-0 cursor-pointer disabled:cursor-not-allowed"
           >
             <span>Keşfet</span>
             <ArrowRight className="w-4 h-4" />
@@ -78,8 +87,8 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({
         </form>
 
         {/* Quick Chips */}
-        <div className="mt-4 flex flex-wrap items-center justify-center gap-2 text-xs text-emerald-200/80">
-          <span className="font-medium text-emerald-300">Popüler gruplar:</span>
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-xs text-[#556B62]">
+          <span className="font-semibold text-[#1E332B]">Popüler gruplar:</span>
           {quickGroups.map((g) => (
             <button
               key={g}
@@ -89,7 +98,11 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({
                 setActiveQuery(g);
                 setSearchParams({ q: g, country: effectiveCountry });
               }}
-              className="px-3 py-1 rounded-lg bg-emerald-950/60 hover:bg-emerald-800/50 text-emerald-200 hover:text-white border border-emerald-800/40 transition-colors cursor-pointer"
+              className={`px-3 py-1.5 rounded-lg border transition-colors cursor-pointer font-medium ${
+                activeQuery.toLocaleLowerCase('tr-TR') === g.toLocaleLowerCase('tr-TR')
+                  ? 'bg-[#247A63] text-white border-[#247A63] shadow-xs'
+                  : 'bg-[#F5F9F4] hover:bg-[#DDEFE3] text-[#1E332B] border-[#D6E4DC]'
+              }`}
             >
               {g}
             </button>
@@ -97,19 +110,43 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({
         </div>
       </div>
 
-      {/* Taxon Group Explorer */}
-      <TaxonGroupExplorer
-        searchQuery={activeQuery}
-        countryCode={effectiveCountry}
-        onSelectSpecies={(sciName, country, turkishName) => {
-          onSelectSpecies(sciName, country, turkishName);
-        }}
-        onBackToDefault={() => navigate('/')}
-        onCountryChange={(nextCountry) => {
-          onCountryChange(nextCountry);
-          setSearchParams({ q: activeQuery, country: nextCountry }, { replace: true });
-        }}
-      />
+      {/* Discovery Content: Horse Breeds Catalog, Taxon Group Explorer, or Clean Idle State */}
+      {!activeQuery ? (
+        <div className="py-16 px-6 text-center bg-white rounded-3xl border border-[#D6E4DC] shadow-xs">
+          <div className="w-12 h-12 rounded-2xl bg-[#DDEFE3] text-[#247A63] flex items-center justify-center mx-auto mb-4">
+            <Compass className="w-6 h-6" />
+          </div>
+          <h2 className="text-xl font-bold text-[#1E332B] mb-2">Keşif İçin Bir Grup veya Tür Seçin</h2>
+          <p className="text-xs sm:text-sm text-[#556B62] max-w-lg mx-auto leading-relaxed">
+            Yukarıdaki arama kutusuna bir canlı grubu yazarak veya popüler gruplardan birini seçerek GBIF Backbone taramasını başlatabilirsiniz.
+          </p>
+        </div>
+      ) : isHorseBreedCatalogQuery(activeQuery) ? (
+        <HorseBreedsExplorer
+          searchQuery={activeQuery}
+          countryCode={effectiveCountry}
+          onSelectBreed={(breed) => {
+            navigate(`/at-irklari/${breed.slug}?country=${encodeURIComponent(effectiveCountry)}`);
+          }}
+          onInspectBiologicalSpecies={() => {
+            onSelectSpecies('Equus caballus', effectiveCountry, 'At');
+          }}
+          onBackToDefault={() => navigate('/')}
+        />
+      ) : (
+        <TaxonGroupExplorer
+          searchQuery={activeQuery}
+          countryCode={effectiveCountry}
+          onSelectSpecies={(sciName, country, turkishName) => {
+            onSelectSpecies(sciName, country, turkishName);
+          }}
+          onBackToDefault={() => navigate('/')}
+          onCountryChange={(nextCountry) => {
+            onCountryChange(nextCountry);
+            setSearchParams({ q: activeQuery, country: nextCountry }, { replace: true });
+          }}
+        />
+      )}
     </div>
   );
 };

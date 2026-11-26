@@ -33,53 +33,53 @@ export const ComparePage: React.FC<ComparePageProps> = ({
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-8">
-      <div className="bg-[#111e17] rounded-3xl p-6 sm:p-8 border border-emerald-800/50 shadow-2xl">
-        <div className="inline-flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-amber-400 mb-2 bg-emerald-950/80 px-3 py-1 rounded-full border border-emerald-800/40">
+      <div className="bg-white rounded-3xl p-6 sm:p-8 border border-[#D6E4DC] shadow-sm">
+        <div className="inline-flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-[#9A631A] font-semibold mb-2">
           <Scale className="w-3.5 h-3.5" />
           <span>İki Canlı Türünü Yan Yana Kıyaslayın</span>
         </div>
-        <h1 className="text-3xl font-extrabold text-white tracking-tight">
+        <h1 className="text-3xl font-extrabold text-[#1E332B] tracking-tight">
           Tür Karşılaştırma Modülü
         </h1>
-        <p className="text-sm text-emerald-100/75 mt-1 max-w-xl">
+        <p className="text-sm text-[#556B62] mt-1.5 max-w-xl leading-relaxed">
           GBIF açık veri arşivinden iki farklı türün gözlem sayılarını, coğrafi dağılımlarını, IUCN statülerini ve 13 yönerge metriğini karşılaştırın.
         </p>
       </div>
 
       {isLoading ? (
-        <div className="py-24 flex flex-col items-center justify-center text-center bg-[#111e17] rounded-3xl border border-emerald-900/60 p-8">
+        <div className="py-24 flex flex-col items-center justify-center text-center bg-white rounded-3xl border border-[#D6E4DC] p-8 shadow-xs">
           <div className="relative w-16 h-16 mb-4">
-            <div className="absolute inset-0 rounded-full border-4 border-emerald-900/60 border-t-emerald-400 animate-spin" />
-            <Compass className="w-8 h-8 text-emerald-400 absolute inset-0 m-auto" />
+            <div className="absolute inset-0 rounded-full border-4 border-[#DDEFE3] border-t-[#247A63] animate-spin" />
+            <Compass className="w-8 h-8 text-[#247A63] absolute inset-0 m-auto" />
           </div>
-          <h3 className="text-xl font-bold text-white mb-2">
+          <h3 className="text-xl font-bold text-[#1E332B] mb-2">
             GBIF Karşılaştırma Verileri Yükleniyor
           </h3>
-          <p className="text-xs text-emerald-300/70 max-w-sm">
+          <p className="text-xs text-[#556B62] max-w-sm">
             {activeCountry === 'TR' ? 'Türkiye (TR)' : 'Tüm Dünya (Global)'} kapsamı için birincil tür kayıtları hazırlanıyor...
           </p>
         </div>
       ) : errorMessage ? (
         <div
-          className={`p-6 rounded-2xl border flex flex-col sm:flex-row items-center justify-between gap-4 ${
+          className={`p-6 rounded-2xl border flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs ${
             isApiError
-              ? 'bg-amber-950/40 border-amber-700/50'
-              : 'bg-rose-950/40 border-rose-700/50'
+              ? 'bg-[#FDF6EC] border-[#F3D9B5]'
+              : 'bg-rose-50 border-rose-200'
           }`}
         >
           <div className="flex items-center gap-3">
             <AlertCircle
-              className={`w-6 h-6 shrink-0 ${isApiError ? 'text-amber-400' : 'text-rose-400'}`}
+              className={`w-6 h-6 shrink-0 ${isApiError ? 'text-amber-700' : 'text-rose-600'}`}
             />
             <div>
               <h3
                 className={`text-sm font-bold mb-0.5 ${
-                  isApiError ? 'text-amber-200' : 'text-rose-200'
+                  isApiError ? 'text-[#6E4716]' : 'text-rose-900'
                 }`}
               >
                 {isApiError ? 'Veri Kaynağına Erişilemedi' : 'Sonuç Bulunamadı'}
               </h3>
-              <p className={`text-sm ${isApiError ? 'text-amber-200/90' : 'text-rose-200/90'}`}>
+              <p className={`text-sm ${isApiError ? 'text-[#6E4716]/90' : 'text-rose-800'}`}>
                 {errorMessage}
               </p>
             </div>
@@ -89,7 +89,7 @@ export const ComparePage: React.FC<ComparePageProps> = ({
               <button
                 type="button"
                 onClick={onRetry}
-                className="px-4 py-2 bg-amber-800/70 hover:bg-amber-700/80 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                className="px-4 py-2 bg-[#247A63] hover:bg-[#1D6350] text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
               >
                 Tekrar Dene
               </button>
@@ -97,8 +97,8 @@ export const ComparePage: React.FC<ComparePageProps> = ({
             <button
               type="button"
               onClick={() => navigate(`/kesfet?country=${encodeURIComponent(activeCountry)}`)}
-              className={`px-4 py-2 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
-                isApiError ? 'bg-[#13241b] hover:bg-emerald-950 border border-emerald-800/50' : 'bg-rose-900/60 hover:bg-rose-800/60'
+              className={`px-4 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+                isApiError ? 'bg-white hover:bg-[#F5F9F4] text-[#1E332B] border border-[#D6E4DC]' : 'bg-rose-700 hover:bg-rose-800 text-white'
               }`}
             >
               Tür Keşfine Git
@@ -113,16 +113,18 @@ export const ComparePage: React.FC<ComparePageProps> = ({
           isLoadingSecondary={isLoadingSecondary}
         />
       ) : (
-        <div className="py-24 text-center bg-[#111e17] rounded-3xl border border-emerald-900/60 p-8">
-          <Scale className="w-12 h-12 text-emerald-400/60 mx-auto mb-3 animate-pulse" />
-          <h3 className="text-lg font-bold text-white mb-2">Karşılaştırma İçin Önce 1. Tür Yüklenmedi</h3>
-          <p className="text-xs text-emerald-300/70 max-w-sm mx-auto mb-6">
+        <div className="py-24 text-center bg-white rounded-3xl border border-[#D6E4DC] p-8 shadow-xs">
+          <div className="w-14 h-14 rounded-2xl bg-[#FDF6EC] border border-[#F3D9B5] text-[#9A631A] flex items-center justify-center mx-auto mb-4">
+            <Scale className="w-7 h-7" />
+          </div>
+          <h3 className="text-lg font-bold text-[#1E332B] mb-2">Karşılaştırma İçin Önce 1. Tür Yüklenmedi</h3>
+          <p className="text-xs text-[#556B62] max-w-sm mx-auto mb-6 leading-relaxed">
             Karşılaştırma yapabilmek için lütfen öncelikle birincil canlı türünü aratın.
           </p>
           <button
             type="button"
             onClick={() => navigate(`/kesfet?country=${encodeURIComponent(activeCountry)}`)}
-            className="px-5 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-[#0b1510] font-bold text-xs rounded-xl transition-all cursor-pointer"
+            className="px-5 py-2.5 bg-[#247A63] hover:bg-[#1D6350] text-white font-bold text-xs rounded-xl transition-all cursor-pointer shadow-xs"
           >
             Tür Keşfine Git
           </button>

@@ -1,71 +1,93 @@
 @import "tailwindcss";
 
+:root {
+  --atlas-bg: #F5F9F4;
+  --atlas-surface: #FFFFFF;
+  --atlas-surface-soft: #F9FCF8;
+  --atlas-green-soft: #DDEFE3;
+  --atlas-mint: #8CCFB0;
+  --atlas-accent: #247A63;
+  --atlas-accent-hover: #1D6350;
+  --atlas-blue-light: #B9DDEB;
+  --atlas-blue-soft: #ECF6FA;
+  --atlas-warm: #F3D9B5;
+  --atlas-warm-soft: #FDF6EC;
+  --atlas-text-primary: #1E332B;
+  --atlas-text-secondary: #556B62;
+  --atlas-border: #D6E4DC;
+  --atlas-border-soft: #E6EFEA;
+}
+
 @layer base {
   body {
+    background-color: var(--atlas-bg);
+    color: var(--atlas-text-primary);
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
-  
+
   .font-mono {
     font-family: 'JetBrains Mono', monospace;
   }
 }
 
-/* Custom scrollbars for clean nature dashboard */
+/* Custom scrollbars for bright nature atlas */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: rgba(11, 21, 16, 0.6);
+  background: #EAF2EC;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(45, 85, 65, 0.5);
+  background: #B8D4C5;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(52, 211, 153, 0.6);
+  background: #247A63;
 }
 
-/* Leaflet dark/nature styling */
+/* Leaflet bright nature styling */
 .leaflet-container {
   font-family: 'Plus Jakarta Sans', sans-serif !important;
-  background-color: #0b1510 !important;
+  background-color: #EAF2EC !important;
   width: 100%;
   height: 100%;
   border-radius: 0.75rem;
 }
 
 .leaflet-popup-content-wrapper {
-  background: #13241b !important;
-  color: #e8f0ec !important;
-  border: 1px solid rgba(52, 211, 153, 0.25) !important;
-  border-radius: 0.5rem !important;
-  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5) !important;
+  background: #FFFFFF !important;
+  color: #1E332B !important;
+  border: 1px solid #D6E4DC !important;
+  border-radius: 0.75rem !important;
+  box-shadow: 0 10px 25px -5px rgba(30, 51, 43, 0.12), 0 4px 10px -4px rgba(30, 51, 43, 0.08) !important;
 }
 
 .leaflet-popup-tip {
-  background: #13241b !important;
+  background: #FFFFFF !important;
 }
 
 .leaflet-popup-content {
   margin: 12px 14px !important;
-  line-height: 1.4 !important;
+  line-height: 1.45 !important;
 }
 
 .leaflet-bar {
-  border: 1px solid rgba(52, 211, 153, 0.2) !important;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
+  border: 1px solid #D6E4DC !important;
+  box-shadow: 0 4px 12px rgba(30, 51, 43, 0.08) !important;
+  border-radius: 0.625rem !important;
+  overflow: hidden;
 }
 
 .leaflet-bar a {
-  background-color: #13241b !important;
-  color: #a7f3d0 !important;
-  border-bottom: 1px solid rgba(52, 211, 153, 0.2) !important;
+  background-color: #FFFFFF !important;
+  color: #247A63 !important;
+  border-bottom: 1px solid #E6EFEA !important;
 }
 
 .leaflet-bar a:hover {
-  background-color: #1b3327 !important;
-  color: #ffffff !important;
+  background-color: #DDEFE3 !important;
+  color: #1E332B !important;
 }
 
 /* Leaflet Custom Pin & Tiles */
@@ -79,13 +101,10 @@
 }
 
 .leaflet-tile {
-  filter: saturate(1.05);
+  filter: saturate(1.03);
 }
 
-/* Dark nature tiles filter for keyless OpenStreetMap */
+/* Dark nature tiles filter for keyless OpenStreetMap (optional tile toggle) */
 .dark-nature-tiles {
   filter: brightness(0.65) invert(1) contrast(1.3) hue-rotate(200deg) saturate(0.4) brightness(0.85);
 }
-
-
-

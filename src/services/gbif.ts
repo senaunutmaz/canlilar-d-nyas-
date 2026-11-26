@@ -2409,7 +2409,13 @@ export async function verifyImageAssetUrl(
         return normalized;
       }
 
-      const res = await fetch(url, { method: 'GET', signal: controller.signal });
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'CanliAtlasi/1.0 (https://github.com/canli-atlasi; educational-biodiversity-project)',
+        },
+        signal: controller.signal,
+      });
       const contentType = res.headers.get('content-type');
       const ctLower = (contentType || '').toLowerCase();
 

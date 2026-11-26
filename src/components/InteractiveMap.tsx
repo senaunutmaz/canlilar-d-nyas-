@@ -70,7 +70,7 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
 
   // Default to Topographic Nature Map (Esri World Topo - 100% free, no API key required)
   const [tileTheme, setTileTheme] = useState<TileTheme>('topo');
-  const [selectedRecord, setSelectedRecord] = useState<GBIFOccurrence | null>(null);
+  const [, setSelectedRecord] = useState<GBIFOccurrence | null>(null);
 
   const validOccurrences = useMemo(
     () => toMappableOccurrences(occurrences, countryCode),
@@ -88,7 +88,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
   useEffect(() => {
     if (!mapContainerRef.current) return;
 
-    // Guard against Leaflet container reuse in React StrictMode
     if ((mapContainerRef.current as any)._leaflet_id) {
       delete (mapContainerRef.current as any)._leaflet_id;
     }
@@ -98,7 +97,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
       mapInstanceRef.current = null;
     }
 
-    // Create Leaflet Map centered on Turkey
     const map = L.map(mapContainerRef.current, {
       center: [39.0, 35.2],
       zoom: 6,
@@ -110,11 +108,9 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
 
     mapInstanceRef.current = map;
 
-    // Markers layer group
     const markersGroup = L.layerGroup().addTo(map);
     markersLayerRef.current = markersGroup;
 
-    // ResizeObserver ensures map tile sizes re-calculate on render/resize
     let resizeObserver: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined' && mapContainerRef.current) {
       resizeObserver = new ResizeObserver(() => {
@@ -125,7 +121,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
       resizeObserver.observe(mapContainerRef.current);
     }
 
-    // Periodic invalidateSize guarantees tiles load as DOM stabilizes
     const t1 = setTimeout(() => map.invalidateSize(), 150);
     const t2 = setTimeout(() => map.invalidateSize(), 500);
 
@@ -155,7 +150,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
 
     switch (tileTheme) {
       case 'dark':
-        // 100% Free OpenStreetMap with high-contrast dark nature CSS filter (No API key needed)
         url = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
         options = {
           attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
@@ -165,7 +159,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
         break;
 
       case 'satellite':
-        // 100% Free Esri World Imagery (No API key needed)
         url = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
         options = {
           attribution: 'Tiles &copy; Esri, Maxar, Earthstar Geographics, USDA, USGS',
@@ -174,7 +167,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
         break;
 
       case 'osm':
-        // 100% Free OpenStreetMap standard (No API key needed)
         url = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
         options = {
           attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
@@ -184,7 +176,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
 
       case 'topo':
       default:
-        // 100% Free Esri World Topo Map (No API key needed, rich topographical relief)
         url = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}';
         options = {
           attribution: 'Tiles &copy; Esri, GEBCO, Garmin, FAO, NOAA, USGS',
@@ -196,7 +187,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
     const tileLayer = L.tileLayer(url, options).addTo(map);
     currentTileLayerRef.current = tileLayer;
 
-    // Invalidate size on tile change
     map.invalidateSize();
   }, [tileTheme]);
 
@@ -210,7 +200,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
 
     const bounds: [number, number][] = [];
 
-    // Add Primary Species Markers (High Performance Circle Markers)
     validOccurrences.forEach((occ) => {
       bounds.push([occ.decimalLatitude, occ.decimalLongitude]);
 
@@ -222,22 +211,22 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
       const occKey = encodeURIComponent(String(occ.key));
 
       const popupHtml = `
-        <div style="font-family: 'Plus Jakarta Sans', sans-serif; font-size: 12px; line-height: 1.4;">
-          <div style="font-weight: 700; color: #34d399; font-size: 13px; margin-bottom: 2px;">
+        <div style="font-family: 'Plus Jakarta Sans', sans-serif; font-size: 12px; line-height: 1.45; color: #1E332B;">
+          <div style="font-weight: 700; color: #247A63; font-size: 13px; margin-bottom: 2px;">
             ${primaryName}
           </div>
-          <div style="font-style: italic; color: #a7f3d0; font-size: 11px; margin-bottom: 6px;">
+          <div style="font-style: italic; color: #556B62; font-size: 11px; margin-bottom: 6px;">
             ${primarySci}
           </div>
-          <div style="border-top: 1px solid rgba(52, 211, 153, 0.25); padding-top: 6px; display: flex; flex-direction: column; gap: 3px;">
+          <div style="border-top: 1px solid #E6EFEA; padding-top: 6px; display: flex; flex-direction: column; gap: 3px;">
             <div><strong>Konum:</strong> ${locText}</div>
             <div><strong>Yıl:</strong> ${yearText}</div>
             <div><strong>Kayıt Türü:</strong> ${basisText}</div>
-            <div style="font-family: monospace; font-size: 10px; color: #93c5fd; margin-top: 2px;">
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #1B6884; margin-top: 2px;">
               ${occ.decimalLatitude.toFixed(4)}°K, ${occ.decimalLongitude.toFixed(4)}°D
             </div>
           </div>
-          <a href="https://www.gbif.org/occurrence/${occKey}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px; color: #6ee7b7; text-decoration: underline; font-size: 11px;">
+          <a href="https://www.gbif.org/occurrence/${occKey}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px; color: #247A63; font-weight: 600; text-decoration: underline; font-size: 11px;">
             GBIF Kayıt Ayrıntısı &rarr;
           </a>
         </div>
@@ -245,18 +234,17 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
 
       const marker = L.circleMarker([occ.decimalLatitude, occ.decimalLongitude], {
         radius: 6,
-        fillColor: '#10b981',
+        fillColor: '#247A63',
         color: '#ffffff',
         weight: 1.5,
         opacity: 0.95,
-        fillOpacity: 0.85,
+        fillOpacity: 0.88,
       }).bindPopup(popupHtml);
 
       marker.on('click', () => setSelectedRecord(occ));
       layer.addLayer(marker);
     });
 
-    // Add Secondary Species Markers (if in comparison mode)
     if (secondarySpecies && validSecondary.length > 0) {
       validSecondary.forEach((occ) => {
         bounds.push([occ.decimalLatitude, occ.decimalLongitude]);
@@ -269,22 +257,22 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
         const occKey = encodeURIComponent(String(occ.key));
 
         const popupHtml = `
-          <div style="font-family: 'Plus Jakarta Sans', sans-serif; font-size: 12px; line-height: 1.4;">
-            <div style="font-weight: 700; color: #fbbf24; font-size: 13px; margin-bottom: 2px;">
+          <div style="font-family: 'Plus Jakarta Sans', sans-serif; font-size: 12px; line-height: 1.45; color: #1E332B;">
+            <div style="font-weight: 700; color: #9A631A; font-size: 13px; margin-bottom: 2px;">
               ${secName}
             </div>
-            <div style="font-style: italic; color: #fde68a; font-size: 11px; margin-bottom: 6px;">
+            <div style="font-style: italic; color: #556B62; font-size: 11px; margin-bottom: 6px;">
               ${secSci}
             </div>
-            <div style="border-top: 1px solid rgba(251, 191, 36, 0.25); padding-top: 6px; display: flex; flex-direction: column; gap: 3px;">
+            <div style="border-top: 1px solid #F3D9B5; padding-top: 6px; display: flex; flex-direction: column; gap: 3px;">
               <div><strong>Konum:</strong> ${locText}</div>
               <div><strong>Yıl:</strong> ${yearText}</div>
               <div><strong>Kayıt Türü:</strong> ${basisText}</div>
-              <div style="font-family: monospace; font-size: 10px; color: #fef08a; margin-top: 2px;">
+              <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #9A631A; margin-top: 2px;">
                 ${occ.decimalLatitude.toFixed(4)}°K, ${occ.decimalLongitude.toFixed(4)}°D
               </div>
             </div>
-            <a href="https://www.gbif.org/occurrence/${occKey}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px; color: #fde68a; text-decoration: underline; font-size: 11px;">
+            <a href="https://www.gbif.org/occurrence/${occKey}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px; color: #9A631A; font-weight: 600; text-decoration: underline; font-size: 11px;">
               GBIF Kayıt Ayrıntısı &rarr;
             </a>
           </div>
@@ -292,11 +280,11 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
 
         const marker = L.circleMarker([occ.decimalLatitude, occ.decimalLongitude], {
           radius: 6,
-          fillColor: '#f59e0b',
+          fillColor: '#D97706',
           color: '#ffffff',
           weight: 1.5,
           opacity: 0.95,
-          fillOpacity: 0.85,
+          fillOpacity: 0.88,
         }).bindPopup(popupHtml);
 
         marker.on('click', () => setSelectedRecord(occ));
@@ -304,7 +292,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
       });
     }
 
-    // Center map view on points or Turkey
     if (bounds.length === 1) {
       map.setView(bounds[0], 8);
     } else if (bounds.length > 1) {
@@ -317,7 +304,6 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
       map.setView([39.0, 35.2], 6);
     }
 
-    // Refresh tile size after fitting bounds
     setTimeout(() => {
       if (mapInstanceRef.current) {
         mapInstanceRef.current.invalidateSize();
@@ -349,28 +335,27 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
   };
 
   return (
-    <div id="harita" className="bg-[#111e17] border border-emerald-900/60 rounded-2xl p-6 lg:p-8 shadow-xl">
+    <div id="harita" className="bg-white border border-[#D6E4DC] rounded-2xl p-6 lg:p-8 shadow-sm">
       {/* Map Header and Indicators */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5 pb-4 border-b border-emerald-900/40">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5 pb-4 border-b border-[#E6EFEA]">
         <div>
-          <h3 className="text-xl font-bold text-white flex items-center gap-2">
-            <Compass className="w-5 h-5 text-emerald-400" />
+          <h3 className="text-xl font-bold text-[#1E332B] flex items-center gap-2">
+            <Compass className="w-5 h-5 text-[#247A63]" />
             <span>Etkileşimli Gözlem Haritası</span>
           </h3>
-          <p className="text-xs text-emerald-300/70 mt-1">
+          <p className="text-xs text-[#556B62] mt-1">
             Doğrulanmış gerçek GBIF GPS koordinatları ve coğrafi yayılım noktaları (Açık ve Ücretsiz Harita Altyapısı)
           </p>
         </div>
 
         {/* Action Controls & Tile Switchers */}
         <div className="flex flex-wrap items-center gap-2">
-          {/* Layer switcher */}
-          <div className="flex items-center gap-1 p-1 bg-[#0b1510] rounded-xl border border-emerald-800/40 text-xs">
+          <div className="flex items-center gap-1 p-1 bg-[#F5F9F4] rounded-xl border border-[#D6E4DC] text-xs">
             <button
               type="button"
               onClick={() => setTileTheme('topo')}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-colors cursor-pointer ${
-                tileTheme === 'topo' ? 'bg-emerald-600 text-white shadow-sm' : 'text-emerald-300/70 hover:text-white'
+              className={`px-2.5 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
+                tileTheme === 'topo' ? 'bg-[#247A63] text-white shadow-xs' : 'text-[#556B62] hover:text-[#1E332B]'
               }`}
             >
               Doğa & Topoğrafya
@@ -378,8 +363,8 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
             <button
               type="button"
               onClick={() => setTileTheme('dark')}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-colors cursor-pointer ${
-                tileTheme === 'dark' ? 'bg-emerald-600 text-white shadow-sm' : 'text-emerald-300/70 hover:text-white'
+              className={`px-2.5 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
+                tileTheme === 'dark' ? 'bg-[#247A63] text-white shadow-xs' : 'text-[#556B62] hover:text-[#1E332B]'
               }`}
             >
               Koyu Doğa
@@ -387,8 +372,8 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
             <button
               type="button"
               onClick={() => setTileTheme('satellite')}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-colors cursor-pointer ${
-                tileTheme === 'satellite' ? 'bg-emerald-600 text-white shadow-sm' : 'text-emerald-300/70 hover:text-white'
+              className={`px-2.5 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
+                tileTheme === 'satellite' ? 'bg-[#247A63] text-white shadow-xs' : 'text-[#556B62] hover:text-[#1E332B]'
               }`}
             >
               Uydu
@@ -396,8 +381,8 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
             <button
               type="button"
               onClick={() => setTileTheme('osm')}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-colors cursor-pointer ${
-                tileTheme === 'osm' ? 'bg-emerald-600 text-white shadow-sm' : 'text-emerald-300/70 hover:text-white'
+              className={`px-2.5 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
+                tileTheme === 'osm' ? 'bg-[#247A63] text-white shadow-xs' : 'text-[#556B62] hover:text-[#1E332B]'
               }`}
             >
               Standart
@@ -408,7 +393,7 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
             type="button"
             onClick={handleResetView}
             title="Haritayı Odakla / Sıfırla"
-            className="p-2 bg-[#0b1510] hover:bg-emerald-950/80 text-emerald-300 hover:text-white rounded-xl border border-emerald-800/40 transition-colors cursor-pointer"
+            className="p-2 bg-[#F5F9F4] hover:bg-[#DDEFE3] text-[#247A63] rounded-xl border border-[#D6E4DC] transition-colors cursor-pointer"
           >
             <RotateCcw className="w-4 h-4" />
           </button>
@@ -416,9 +401,7 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
       </div>
 
       {/* Map Canvas Stage */}
-      <div className="relative w-full h-[460px] sm:h-[530px] rounded-xl overflow-hidden border border-emerald-800/40 shadow-inner bg-[#0b1510]">
-        
-        {/* Leaflet container element with full dimensions */}
+      <div className="relative w-full h-[460px] sm:h-[530px] rounded-xl overflow-hidden border border-[#D6E4DC] bg-[#EAF2EC]">
         <div 
           ref={mapContainerRef} 
           className="w-full h-full"
@@ -426,25 +409,25 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
         />
 
         {/* Floating Map HUD Legend Overlay */}
-        <div className="absolute top-4 right-4 z-[500] bg-[#0b1510]/95 backdrop-blur-md p-3.5 rounded-xl border border-emerald-700/60 text-xs shadow-2xl max-w-xs pointer-events-auto">
-          <div className="font-semibold text-white mb-2 flex items-center justify-between gap-3">
+        <div className="absolute top-4 right-4 z-[500] bg-white/95 backdrop-blur-md p-3.5 rounded-xl border border-[#D6E4DC] text-xs shadow-md max-w-xs pointer-events-auto">
+          <div className="font-bold text-[#1E332B] mb-2 flex items-center justify-between gap-3">
             <span>Harita Göstergeleri</span>
-            <span className="font-mono text-[10px] text-emerald-400 font-bold bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-700/40">
+            <span className="font-mono text-[10px] text-[#247A63] font-bold bg-[#DDEFE3] px-2 py-0.5 rounded border border-[#8CCFB0]">
               {validOccurrences.length} / {occurrences.length} Nokta
             </span>
           </div>
 
           <div className="space-y-2">
-            <div className="flex items-center gap-2 text-emerald-200">
-              <span className="w-3 h-3 rounded-full bg-emerald-500 border border-white shadow-sm shadow-emerald-500/50 shrink-0" />
+            <div className="flex items-center gap-2 text-[#1E332B] font-medium">
+              <span className="w-3 h-3 rounded-full bg-[#247A63] border border-white shadow-xs shrink-0" />
               <span className="truncate">
                 {species.turkishName || species.canonicalName} ({validOccurrences.length} nokta)
               </span>
             </div>
 
             {secondarySpecies && (
-              <div className="flex items-center gap-2 text-amber-200 pt-1.5 border-t border-emerald-900/60">
-                <span className="w-3 h-3 rounded-full bg-amber-500 border border-white shadow-sm shadow-amber-500/50 shrink-0" />
+              <div className="flex items-center gap-2 text-[#6E4716] pt-1.5 border-t border-[#E6EFEA] font-medium">
+                <span className="w-3 h-3 rounded-full bg-[#D97706] border border-white shadow-xs shrink-0" />
                 <span className="truncate">
                   {secondarySpecies.turkishName || secondarySpecies.canonicalName} ({validSecondary.length} nokta)
                 </span>
@@ -455,16 +438,18 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
 
         {/* Informational overlay when no coordinates exist */}
         {validOccurrences.length === 0 && (
-          <div className="absolute inset-0 z-[450] bg-[#0b1510]/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center pointer-events-none">
-            <div className="p-4 rounded-2xl bg-emerald-950/90 border border-emerald-700/50 max-w-md shadow-2xl">
-              <MapPin className="w-8 h-8 text-amber-400 mx-auto mb-2" />
-              <h4 className="text-sm font-bold text-white mb-1">
+          <div className="absolute inset-0 z-[450] bg-[#F5F9F4]/80 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-center pointer-events-none">
+            <div className="p-5 rounded-2xl bg-white border border-[#D6E4DC] max-w-md shadow-lg">
+              <div className="w-10 h-10 rounded-xl bg-[#FDF6EC] border border-[#F3D9B5] text-[#9A631A] flex items-center justify-center mx-auto mb-2.5">
+                <MapPin className="w-5 h-5" />
+              </div>
+              <h4 className="text-sm font-bold text-[#1E332B] mb-1">
                 Doğrulanmış GPS Koordinatı Bulunmuyor
               </h4>
-              <p className="text-xs text-emerald-200/80 leading-relaxed mb-3">
+              <p className="text-xs text-[#556B62] leading-relaxed mb-3">
                 Bu tür için haritada gösterilebilecek konum verisi bulunmuyor.
               </p>
-              <div className="text-[11px] font-mono text-emerald-400">
+              <div className="text-[11px] font-mono text-[#247A63] font-medium">
                 Bilimsel dürüstlük gereği konumu belirsiz kayıtlar için temsili veya sahte nokta üretilmez.
               </div>
             </div>
@@ -472,26 +457,26 @@ export const InteractiveMap: React.FC<InteractiveMapProps> = ({
         )}
 
         {/* Scientific Guarantee Notice */}
-        <div className="absolute bottom-4 left-4 z-[500] bg-[#0b1510]/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-emerald-800/40 text-[11px] text-emerald-300/80 shadow-lg hidden sm:flex items-center gap-2 pointer-events-none">
-          <Info className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+        <div className="absolute bottom-4 left-4 z-[500] bg-white/95 backdrop-blur-md px-3 py-1.5 rounded-lg border border-[#D6E4DC] text-[11px] text-[#556B62] shadow-sm hidden sm:flex items-center gap-2 pointer-events-none">
+          <Info className="w-3.5 h-3.5 text-[#247A63] shrink-0" />
           <span>Yalnızca doğrulanmış gerçek GPS koordinatları işaretlenir; koordinatı olmayan kayıtlar için yer uydurulmaz.</span>
         </div>
       </div>
 
       {/* Under-Map Metrics */}
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs font-mono text-emerald-300/80 pt-2">
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs font-mono text-[#556B62] pt-2">
         <div className="flex flex-wrap items-center gap-2">
-          <span>Haritada Gösterilen: <strong className="text-white font-bold">{validOccurrences.length} kayıt</strong></span>
+          <span>Haritada Gösterilen: <strong className="text-[#1E332B] font-bold">{validOccurrences.length} kayıt</strong></span>
           <span aria-hidden="true">·</span>
-          <span>Koordinatsız / Hariç: <strong className="text-amber-300 font-bold">{unmappedSampleCount} kayıt</strong></span>
+          <span>Koordinatsız / Hariç: <strong className="text-[#9A631A] font-bold">{unmappedSampleCount} kayıt</strong></span>
           {totalRecords > occurrences.length && (
             <>
               <span aria-hidden="true">·</span>
-              <span>Arşiv Toplamı: <strong className="text-emerald-200 font-bold">{totalRecords.toLocaleString('tr-TR')}</strong></span>
+              <span>Arşiv Toplamı: <strong className="text-[#247A63] font-bold">{totalRecords.toLocaleString('tr-TR')}</strong></span>
             </>
           )}
         </div>
-        <div className="text-emerald-400/60 hidden sm:block">
+        <div className="text-[#556B62] hidden sm:block">
           Yakınlaştırmak için haritaya çift tıklayın veya fare tekerini kullanın
         </div>
       </div>

@@ -42,18 +42,18 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
   return (
     <div className="space-y-8 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
       {/* Header Bar */}
-      <div className="bg-[#111e17] rounded-3xl p-6 sm:p-8 border border-emerald-800/50 shadow-2xl flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+      <div className="bg-white rounded-3xl p-6 sm:p-8 border border-[#D6E4DC] shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-6">
         <div>
-          <div className="inline-flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-emerald-400 mb-2 bg-emerald-950/80 px-3 py-1 rounded-full border border-emerald-800/40">
+          <div className="inline-flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-[#247A63] font-semibold mb-2">
             <BarChart3 className="w-3.5 h-3.5" />
             <span>GBIF Arşiv Fasetleri & Zamansal Dağılım</span>
           </div>
-          <h1 className="text-3xl font-extrabold text-white tracking-tight">
+          <h1 className="text-3xl font-extrabold text-[#1E332B] tracking-tight">
             Veri & Zaman Analizi
           </h1>
-          <p className="text-sm text-emerald-100/75 mt-1 max-w-xl">
+          <p className="text-sm text-[#556B62] mt-1.5 max-w-xl leading-relaxed">
             {primaryAnalysis ? (
-              <>İncelenen Tür: <strong className="text-emerald-300">{primaryAnalysis.species.turkishName || primaryAnalysis.species.canonicalName}</strong> (<em>{primaryAnalysis.species.scientificName}</em>) — {primaryAnalysis.countryName} kapsamı yıllık ve bölgesel istatistikleri.</>
+              <>İncelenen Tür: <strong className="text-[#247A63]">{primaryAnalysis.species.turkishName || primaryAnalysis.species.canonicalName}</strong> (<em>{primaryAnalysis.species.scientificName}</em>) — {primaryAnalysis.countryName} kapsamı yıllık ve bölgesel istatistikleri.</>
             ) : (
               'GBIF açık bilim arşivinden hesaplanan yıllık trendler ve il dağılımı.'
             )}
@@ -62,15 +62,15 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
 
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shrink-0">
           {/* Country Scope Toggle */}
-          <div className="flex items-center gap-1.5 p-1 bg-[#0b1510] rounded-xl border border-emerald-800/60">
+          <div className="flex items-center gap-1 p-1 bg-[#F5F9F4] rounded-xl border border-[#D6E4DC]">
             <button
               type="button"
               disabled={isLoading}
               onClick={() => onCountryChange('TR')}
               className={`px-3 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer disabled:opacity-50 ${
                 activeCountry === 'TR'
-                  ? 'bg-emerald-500 text-[#0b1510] shadow-md'
-                  : 'text-emerald-200/70 hover:text-white'
+                  ? 'bg-[#247A63] text-white shadow-xs'
+                  : 'text-[#556B62] hover:text-[#1E332B]'
               }`}
             >
               Türkiye (TR)
@@ -81,8 +81,8 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
               onClick={() => onCountryChange('')}
               className={`px-3 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer disabled:opacity-50 ${
                 activeCountry === ''
-                  ? 'bg-emerald-500 text-[#0b1510] shadow-md'
-                  : 'text-emerald-200/70 hover:text-white'
+                  ? 'bg-[#247A63] text-white shadow-xs'
+                  : 'text-[#556B62] hover:text-[#1E332B]'
               }`}
             >
               Tüm Dünya (Global)
@@ -90,21 +90,21 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
           </div>
 
           {/* Quick Search */}
-          <form onSubmit={handleSearchSubmit} className="flex items-center gap-2 bg-[#0b1510] p-2 rounded-2xl border border-emerald-700/50 shadow-md shrink-0">
+          <form onSubmit={handleSearchSubmit} className="flex items-center gap-2 bg-[#F5F9F4] p-1.5 rounded-2xl border border-[#D6E4DC] shrink-0">
             <div className="relative flex items-center flex-1">
-              <Search className="w-4 h-4 text-emerald-400 absolute left-3 pointer-events-none" />
+              <Search className="w-4 h-4 text-[#247A63] absolute left-3 pointer-events-none" />
               <input
                 type="text"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
                 placeholder="Tür analizi yükle..."
-                className="w-44 sm:w-56 pl-9 pr-3 py-2 bg-transparent text-white placeholder-emerald-100/40 text-xs focus:outline-none"
+                className="w-44 sm:w-56 pl-9 pr-3 py-2 bg-transparent text-[#1E332B] placeholder-[#556B62]/65 text-xs focus:outline-none font-medium"
               />
             </div>
             <button
               type="submit"
               disabled={isLoading || !searchInput.trim()}
-              className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-[#0b1510] font-bold text-xs rounded-xl transition-all cursor-pointer"
+              className="px-4 py-2 bg-[#247A63] hover:bg-[#1D6350] disabled:bg-[#DDEFE3] disabled:text-[#556B62] text-white font-bold text-xs rounded-xl transition-all cursor-pointer disabled:cursor-not-allowed"
             >
               Analiz Et
             </button>
@@ -114,39 +114,39 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
 
       {/* Loading Indicator */}
       {isLoading ? (
-        <div className="py-24 flex flex-col items-center justify-center text-center bg-[#111e17] rounded-3xl border border-emerald-900/60 p-8">
+        <div className="py-24 flex flex-col items-center justify-center text-center bg-white rounded-3xl border border-[#D6E4DC] p-8 shadow-xs">
           <div className="relative w-16 h-16 mb-4">
-            <div className="absolute inset-0 rounded-full border-4 border-emerald-900/60 border-t-emerald-400 animate-spin" />
-            <Compass className="w-8 h-8 text-emerald-400 absolute inset-0 m-auto" />
+            <div className="absolute inset-0 rounded-full border-4 border-[#DDEFE3] border-t-[#247A63] animate-spin" />
+            <Compass className="w-8 h-8 text-[#247A63] absolute inset-0 m-auto" />
           </div>
-          <h3 className="text-xl font-bold text-white mb-2">
+          <h3 className="text-xl font-bold text-[#1E332B] mb-2">
             GBIF Açık Bilim Veri Tabanı Taranıyor
           </h3>
-          <p className="text-xs text-emerald-300/70 max-w-sm">
+          <p className="text-xs text-[#556B62] max-w-sm">
             {activeCountry === 'TR' ? 'Türkiye (TR)' : 'Tüm Dünya (Global)'} kapsamı için gözlem kayıtları, yıllık istatistikler ve il dağılımı hesaplanıyor...
           </p>
         </div>
       ) : errorMessage ? (
         <div
-          className={`p-6 rounded-2xl border flex flex-col sm:flex-row items-center justify-between gap-4 ${
+          className={`p-6 rounded-2xl border flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs ${
             isApiError
-              ? 'bg-amber-950/40 border-amber-700/50'
-              : 'bg-rose-950/40 border-rose-700/50'
+              ? 'bg-[#FDF6EC] border-[#F3D9B5]'
+              : 'bg-rose-50 border-rose-200'
           }`}
         >
           <div className="flex items-center gap-3">
             <AlertCircle
-              className={`w-6 h-6 shrink-0 ${isApiError ? 'text-amber-400' : 'text-rose-400'}`}
+              className={`w-6 h-6 shrink-0 ${isApiError ? 'text-amber-700' : 'text-rose-600'}`}
             />
             <div>
               <h3
                 className={`text-sm font-bold mb-0.5 ${
-                  isApiError ? 'text-amber-200' : 'text-rose-200'
+                  isApiError ? 'text-[#6E4716]' : 'text-rose-900'
                 }`}
               >
                 {isApiError ? 'Veri Kaynağına Erişilemedi' : 'Sonuç Bulunamadı'}
               </h3>
-              <p className={`text-sm ${isApiError ? 'text-amber-200/90' : 'text-rose-200/90'}`}>
+              <p className={`text-sm ${isApiError ? 'text-[#6E4716]/90' : 'text-rose-800'}`}>
                 {errorMessage}
               </p>
             </div>
@@ -156,7 +156,7 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
               <button
                 type="button"
                 onClick={onRetry}
-                className="px-4 py-2 bg-amber-800/70 hover:bg-amber-700/80 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                className="px-4 py-2 bg-[#247A63] hover:bg-[#1D6350] text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
               >
                 Tekrar Dene
               </button>
@@ -164,8 +164,8 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
             <button
               type="button"
               onClick={() => navigate(`/kesfet?country=${encodeURIComponent(activeCountry)}`)}
-              className={`px-4 py-2 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
-                isApiError ? 'bg-[#13241b] hover:bg-emerald-950 border border-emerald-800/50' : 'bg-rose-900/60 hover:bg-rose-800/60'
+              className={`px-4 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+                isApiError ? 'bg-white hover:bg-[#F5F9F4] text-[#1E332B] border border-[#D6E4DC]' : 'bg-rose-700 hover:bg-rose-800 text-white'
               }`}
             >
               Tür Keşfine Git
@@ -213,16 +213,18 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
           />
         </div>
       ) : (
-        <div className="py-24 text-center bg-[#111e17] rounded-3xl border border-emerald-900/60 p-8">
-          <BarChart3 className="w-12 h-12 text-emerald-400/60 mx-auto mb-3 animate-pulse" />
-          <h3 className="text-lg font-bold text-white mb-2">Analiz İçin Tür Yüklenmedi</h3>
-          <p className="text-xs text-emerald-300/70 max-w-sm mx-auto mb-6">
+        <div className="py-24 text-center bg-white rounded-3xl border border-[#D6E4DC] p-8 shadow-xs">
+          <div className="w-14 h-14 rounded-2xl bg-[#DDEFE3] text-[#247A63] flex items-center justify-center mx-auto mb-4">
+            <BarChart3 className="w-7 h-7" />
+          </div>
+          <h3 className="text-lg font-bold text-[#1E332B] mb-2">Analiz İçin Tür Yüklenmedi</h3>
+          <p className="text-xs text-[#556B62] max-w-sm mx-auto mb-6 leading-relaxed">
             Detaylı grafik ve bölge istatistiklerini görüntülemek için lütfen arama çubuğundan bir canlı türü aratın.
           </p>
           <button
             type="button"
             onClick={() => navigate(`/kesfet?country=${encodeURIComponent(activeCountry)}`)}
-            className="px-5 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-[#0b1510] font-bold text-xs rounded-xl transition-all cursor-pointer"
+            className="px-5 py-2.5 bg-[#247A63] hover:bg-[#1D6350] text-white font-bold text-xs rounded-xl transition-all cursor-pointer shadow-xs"
           >
             Tür Keşfine Git
           </button>

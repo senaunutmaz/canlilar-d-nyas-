@@ -323,3 +323,26 @@ export interface SearchIntentResult {
   reason?: string;
 }
 
+export type HorseBreedCategory = 'riding_racing' | 'draft_carriage' | 'pony_feral_nordic';
+
+export interface HorseBreedRecord {
+  slug: string;
+  classificationKind: 'DOMESTIC_BREED';
+  scientificSpecies: 'Equus caballus';
+  scientificClassificationLabel: string;
+  turkishName: string;
+  internationalName: string;
+  aliases: string[];
+  category: HorseBreedCategory;
+  categoryLabel: string;
+  originCountryOrRegion: string;
+  distinguishingTraits: string[];
+  summary: string;
+  distributionAndPopulationNote: string;
+  isFeralPopulation?: boolean;
+  wikipediaTitle: string;
+  sourceUrl: string;
+  sourceName: string;
+}
+
+

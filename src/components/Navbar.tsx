@@ -35,71 +35,54 @@ export const Navbar: React.FC<NavbarProps> = ({ activeSpecies, activeCountry, ac
     setMobileMenuOpen(false);
   };
 
+  const desktopLinkClass = ({ isActive }: { isActive: boolean }) =>
+    `px-3.5 py-2 rounded-xl transition-all whitespace-nowrap shrink-0 ${
+      isActive
+        ? 'bg-[#247A63] text-white font-semibold shadow-sm'
+        : 'text-[#556B62] hover:text-[#1E332B] hover:bg-[#DDEFE3]/60 font-medium'
+    }`;
+
+  const mobileLinkClass = ({ isActive }: { isActive: boolean }) =>
+    `block px-4 py-2.5 rounded-xl text-sm transition-colors ${
+      isActive
+        ? 'bg-[#247A63] text-white font-semibold shadow-sm'
+        : 'text-[#1E332B] hover:bg-[#DDEFE3]/60 font-medium'
+    }`;
+
   return (
-    <header className="sticky top-0 z-40 bg-[#0b1510]/90 backdrop-blur-md border-b border-emerald-950/60 px-6 py-3.5 transition-colors">
+    <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-[#D6E4DC] px-6 py-3.5 shadow-2xs transition-colors">
       <div className="max-w-7xl mx-auto flex items-center justify-between gap-6">
         
         {/* Wordmark */}
         <NavLink 
           to="/" 
           onClick={handleLinkClick}
-          className="text-lg font-bold tracking-tight text-white hover:text-emerald-400 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2.5"
+          className="text-lg font-bold tracking-tight text-[#1E332B] hover:text-[#247A63] transition-colors whitespace-nowrap shrink-0 flex items-center gap-2.5"
         >
-          <div className="w-8 h-8 rounded-xl bg-emerald-600/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+          <div className="w-8 h-8 rounded-xl bg-[#DDEFE3] border border-[#8CCFB0] flex items-center justify-center text-[#247A63]">
             <Compass className="w-4 h-4" />
           </div>
           <span>Canlı Atlası</span>
         </NavLink>
 
         {/* Desktop Navigation Links */}
-        <nav className="hidden xl:flex items-center gap-4 text-xs font-medium text-emerald-100/70">
-          <NavLink 
-            to="/" 
-            end
-            className={({ isActive }) => 
-              `px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 ${isActive ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'hover:text-white hover:bg-emerald-950/40'}`
-            }
-          >
+        <nav className="hidden xl:flex items-center gap-2 text-xs">
+          <NavLink to="/" end className={desktopLinkClass}>
             Ana Sayfa
           </NavLink>
-          <NavLink 
-            to={`/kesfet${exploreParams}`}
-            className={({ isActive }) => 
-              `px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 ${isActive ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'hover:text-white hover:bg-emerald-950/40'}`
-            }
-          >
+          <NavLink to={`/kesfet${exploreParams}`} className={desktopLinkClass}>
             Tür Keşfi
           </NavLink>
-          <NavLink 
-            to={`/analiz${speciesParams}`}
-            className={({ isActive }) => 
-              `px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 ${isActive ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'hover:text-white hover:bg-emerald-950/40'}`
-            }
-          >
+          <NavLink to={`/analiz${speciesParams}`} className={desktopLinkClass}>
             Veri Analizi
           </NavLink>
-          <NavLink 
-            to={`/harita${speciesParams}`}
-            className={({ isActive }) => 
-              `px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 ${isActive ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'hover:text-white hover:bg-emerald-950/40'}`
-            }
-          >
+          <NavLink to={`/harita${speciesParams}`} className={desktopLinkClass}>
             Gözlem Haritası
           </NavLink>
-          <NavLink 
-            to={`/karsilastir${speciesParams}`}
-            className={({ isActive }) => 
-              `px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 ${isActive ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'hover:text-white hover:bg-emerald-950/40'}`
-            }
-          >
+          <NavLink to={`/karsilastir${speciesParams}`} className={desktopLinkClass}>
             Tür Karşılaştır
           </NavLink>
-          <NavLink 
-            to="/koruma" 
-            className={({ isActive }) => 
-              `px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 ${isActive ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'hover:text-white hover:bg-emerald-950/40'}`
-            }
-          >
+          <NavLink to="/koruma" className={desktopLinkClass}>
             IUCN Koruma
           </NavLink>
         </nav>
@@ -107,11 +90,12 @@ export const Navbar: React.FC<NavbarProps> = ({ activeSpecies, activeCountry, ac
         {/* Actions & Mobile Hamburger Toggle */}
         <div className="flex items-center gap-3 shrink-0">
           <button
+            type="button"
             onClick={() => {
               handleLinkClick();
               navigate(`/karsilastir${speciesParams}`);
             }}
-            className="hidden sm:flex px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/40 transition-all items-center gap-1.5 whitespace-nowrap cursor-pointer"
+            className="hidden sm:flex px-4 py-2 text-xs font-semibold rounded-xl bg-[#247A63] hover:bg-[#1D6350] text-white shadow-xs transition-all items-center gap-1.5 whitespace-nowrap cursor-pointer"
           >
             <Scale className="w-3.5 h-3.5" />
             <span>Karşılaştır</span>
@@ -123,7 +107,7 @@ export const Navbar: React.FC<NavbarProps> = ({ activeSpecies, activeCountry, ac
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
             aria-expanded={mobileMenuOpen}
             aria-controls="mobile-navigation-menu"
-            className="xl:hidden p-2 rounded-xl bg-emerald-950/50 border border-emerald-800/50 text-emerald-300 hover:text-white transition-colors cursor-pointer"
+            className="xl:hidden p-2 rounded-xl bg-[#F5F9F4] border border-[#D6E4DC] text-[#247A63] hover:bg-[#DDEFE3] transition-colors cursor-pointer"
             aria-label="Mobil Menü"
           >
             {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -137,61 +121,24 @@ export const Navbar: React.FC<NavbarProps> = ({ activeSpecies, activeCountry, ac
         <nav
           id="mobile-navigation-menu"
           aria-label="Mobil Navigasyon"
-          className="xl:hidden absolute top-full left-0 right-0 bg-[#0b1510] border-b border-emerald-900/80 px-6 py-5 shadow-2xl space-y-3 animate-fadeIn z-50"
+          className="xl:hidden absolute top-full left-0 right-0 bg-white border-b border-[#D6E4DC] px-6 py-5 shadow-xl space-y-2 z-50"
         >
-          <NavLink 
-            to="/" 
-            end
-            onClick={handleLinkClick}
-            className={({ isActive }) => 
-              `block px-4 py-2.5 rounded-xl text-sm font-medium transition-colors ${isActive ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'text-emerald-100/80 hover:bg-emerald-950/50 hover:text-white'}`
-            }
-          >
+          <NavLink to="/" end onClick={handleLinkClick} className={mobileLinkClass}>
             Ana Sayfa
           </NavLink>
-          <NavLink 
-            to={`/kesfet${exploreParams}`}
-            onClick={handleLinkClick}
-            className={({ isActive }) => 
-              `block px-4 py-2.5 rounded-xl text-sm font-medium transition-colors ${isActive ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'text-emerald-100/80 hover:bg-emerald-950/50 hover:text-white'}`
-            }
-          >
+          <NavLink to={`/kesfet${exploreParams}`} onClick={handleLinkClick} className={mobileLinkClass}>
             Tür Keşfi
           </NavLink>
-          <NavLink 
-            to={`/analiz${speciesParams}`}
-            onClick={handleLinkClick}
-            className={({ isActive }) => 
-              `block px-4 py-2.5 rounded-xl text-sm font-medium transition-colors ${isActive ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'text-emerald-100/80 hover:bg-emerald-950/50 hover:text-white'}`
-            }
-          >
+          <NavLink to={`/analiz${speciesParams}`} onClick={handleLinkClick} className={mobileLinkClass}>
             Veri Analizi
           </NavLink>
-          <NavLink 
-            to={`/harita${speciesParams}`}
-            onClick={handleLinkClick}
-            className={({ isActive }) => 
-              `block px-4 py-2.5 rounded-xl text-sm font-medium transition-colors ${isActive ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'text-emerald-100/80 hover:bg-emerald-950/50 hover:text-white'}`
-            }
-          >
+          <NavLink to={`/harita${speciesParams}`} onClick={handleLinkClick} className={mobileLinkClass}>
             Gözlem Haritası
           </NavLink>
-          <NavLink 
-            to={`/karsilastir${speciesParams}`}
-            onClick={handleLinkClick}
-            className={({ isActive }) => 
-              `block px-4 py-2.5 rounded-xl text-sm font-medium transition-colors ${isActive ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'text-emerald-100/80 hover:bg-emerald-950/50 hover:text-white'}`
-            }
-          >
+          <NavLink to={`/karsilastir${speciesParams}`} onClick={handleLinkClick} className={mobileLinkClass}>
             Tür Karşılaştır
           </NavLink>
-          <NavLink 
-            to="/koruma" 
-            onClick={handleLinkClick}
-            className={({ isActive }) => 
-              `block px-4 py-2.5 rounded-xl text-sm font-medium transition-colors ${isActive ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'text-emerald-100/80 hover:bg-emerald-950/50 hover:text-white'}`
-            }
-          >
+          <NavLink to="/koruma" onClick={handleLinkClick} className={mobileLinkClass}>
             IUCN Koruma
           </NavLink>
         </nav>

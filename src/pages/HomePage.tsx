@@ -43,27 +43,27 @@ export const HomePage: React.FC<HomePageProps> = ({
       {!isLoading && errorMessage && (
         <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
           <div
-            className={`p-5 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 ${
+            className={`p-5 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm ${
               isApiError
-                ? 'bg-amber-950/40 border-amber-700/50'
-                : 'bg-rose-950/40 border-rose-700/50'
+                ? 'bg-[#FDF6EC] border-[#F3D9B5]'
+                : 'bg-rose-50 border-rose-200'
             }`}
           >
             <div className="flex items-start gap-3">
               <AlertCircle
-                className={`w-5 h-5 shrink-0 mt-0.5 ${isApiError ? 'text-amber-400' : 'text-rose-400'}`}
+                className={`w-5 h-5 shrink-0 mt-0.5 ${isApiError ? 'text-amber-700' : 'text-rose-600'}`}
               />
               <div>
                 <h3
                   className={`text-sm font-bold mb-0.5 ${
-                    isApiError ? 'text-amber-200' : 'text-rose-200'
+                    isApiError ? 'text-[#7A4E16]' : 'text-rose-900'
                   }`}
                 >
                   {isApiError ? 'Veri Kaynağına Erişilemedi' : 'Sonuç Bulunamadı'}
                 </h3>
                 <p
                   className={`text-xs sm:text-sm leading-relaxed ${
-                    isApiError ? 'text-amber-200/90' : 'text-rose-200/90'
+                    isApiError ? 'text-[#7A4E16]/90' : 'text-rose-800'
                   }`}
                 >
                   {errorMessage}
@@ -74,7 +74,7 @@ export const HomePage: React.FC<HomePageProps> = ({
               <button
                 type="button"
                 onClick={onRetry}
-                className="px-4 py-2 bg-amber-800/70 hover:bg-amber-700/80 text-white rounded-xl text-xs font-semibold transition-colors shrink-0 cursor-pointer"
+                className="px-4 py-2 bg-[#247A63] hover:bg-[#1D6350] text-white rounded-xl text-xs font-semibold transition-colors shrink-0 cursor-pointer"
               >
                 Tekrar Dene
               </button>
@@ -85,14 +85,14 @@ export const HomePage: React.FC<HomePageProps> = ({
 
       {/* Quick Navigation Tile Cards */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-emerald-400 mb-2 bg-emerald-950/60 border border-emerald-800/40 px-3 py-1 rounded-full">
-            <span>Canlı Atlası Keşif Modülleri</span>
-          </div>
-          <h2 className="text-3xl font-extrabold text-white tracking-tight">
+        <div className="text-center mb-10">
+          <span className="text-xs font-mono uppercase tracking-widest text-[#247A63] font-semibold block mb-2">
+            Canlı Atlası Keşif Modülleri
+          </span>
+          <h2 className="text-3xl font-extrabold text-[#1E332B] tracking-tight">
             Biyoçeşitlilik Portalları
           </h2>
-          <p className="text-sm text-emerald-100/70 mt-1 max-w-xl mx-auto">
+          <p className="text-sm text-[#556B62] mt-2 max-w-xl mx-auto leading-relaxed">
             Milyonlarca GBIF gözlem kaydını interaktif haritalar, zamansal analizler ve çok sayfalı keşif araçlarıyla inceleyin.
           </p>
         </div>
@@ -101,20 +101,20 @@ export const HomePage: React.FC<HomePageProps> = ({
           {/* Tile 1: Explore */}
           <div 
             onClick={() => navigate(`/kesfet?country=${encodeURIComponent(activeCountry)}`)}
-            className="group bg-[#111e17] hover:bg-[#13241b] rounded-3xl p-6 border border-emerald-900/60 hover:border-emerald-500/60 shadow-xl transition-all duration-300 cursor-pointer flex flex-col justify-between"
+            className="group bg-white hover:bg-[#F9FCF8] rounded-3xl p-6 border border-[#D6E4DC] hover:border-[#8CCFB0] shadow-xs hover:shadow-md transition-all duration-200 cursor-pointer flex flex-col justify-between"
           >
             <div>
-              <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-4 group-hover:scale-110 transition-transform">
+              <div className="w-12 h-12 rounded-2xl bg-[#DDEFE3] border border-[#8CCFB0]/60 flex items-center justify-center text-[#247A63] mb-4 group-hover:scale-105 transition-transform">
                 <Compass className="w-6 h-6" />
               </div>
-              <h3 className="text-lg font-bold text-white mb-2 group-hover:text-emerald-300 transition-colors">
+              <h3 className="text-lg font-bold text-[#1E332B] mb-2 group-hover:text-[#247A63] transition-colors">
                 Dinamik Tür Keşfi
               </h3>
-              <p className="text-xs text-emerald-100/70 leading-relaxed mb-4">
+              <p className="text-xs text-[#556B62] leading-relaxed mb-4">
                 Bütün Animalia alemini kapsayan genel hayvan grupları, alt gruplar ve doğrulanmış tür indeksleri.
               </p>
             </div>
-            <div className="flex items-center gap-1 text-xs font-bold text-emerald-400 group-hover:translate-x-1 transition-transform">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-[#247A63] group-hover:translate-x-1 transition-transform">
               <span>Keşfetmeye Başla</span>
               <ArrowRight className="w-4 h-4" />
             </div>
@@ -123,20 +123,20 @@ export const HomePage: React.FC<HomePageProps> = ({
           {/* Tile 2: Map */}
           <div 
             onClick={() => navigate('/harita')}
-            className="group bg-[#111e17] hover:bg-[#13241b] rounded-3xl p-6 border border-emerald-900/60 hover:border-emerald-500/60 shadow-xl transition-all duration-300 cursor-pointer flex flex-col justify-between"
+            className="group bg-white hover:bg-[#F9FCF8] rounded-3xl p-6 border border-[#D6E4DC] hover:border-[#B9DDEB] shadow-xs hover:shadow-md transition-all duration-200 cursor-pointer flex flex-col justify-between"
           >
             <div>
-              <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-4 group-hover:scale-110 transition-transform">
+              <div className="w-12 h-12 rounded-2xl bg-[#ECF6FA] border border-[#B9DDEB] flex items-center justify-center text-[#1B6884] mb-4 group-hover:scale-105 transition-transform">
                 <MapPin className="w-6 h-6" />
               </div>
-              <h3 className="text-lg font-bold text-white mb-2 group-hover:text-emerald-300 transition-colors">
+              <h3 className="text-lg font-bold text-[#1E332B] mb-2 group-hover:text-[#247A63] transition-colors">
                 Biyoçeşitlilik Haritası
               </h3>
-              <p className="text-xs text-emerald-100/70 leading-relaxed mb-4">
+              <p className="text-xs text-[#556B62] leading-relaxed mb-4">
                 OpenStreetMap ve Leaflet altyapısıyla Türkiye ve Global ölçekte gerçek GPS gözlem noktaları.
               </p>
             </div>
-            <div className="flex items-center gap-1 text-xs font-bold text-emerald-400 group-hover:translate-x-1 transition-transform">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-[#247A63] group-hover:translate-x-1 transition-transform">
               <span>Haritayı Aç</span>
               <ArrowRight className="w-4 h-4" />
             </div>
@@ -145,20 +145,20 @@ export const HomePage: React.FC<HomePageProps> = ({
           {/* Tile 3: Analysis */}
           <div 
             onClick={() => navigate('/analiz')}
-            className="group bg-[#111e17] hover:bg-[#13241b] rounded-3xl p-6 border border-emerald-900/60 hover:border-emerald-500/60 shadow-xl transition-all duration-300 cursor-pointer flex flex-col justify-between"
+            className="group bg-white hover:bg-[#F9FCF8] rounded-3xl p-6 border border-[#D6E4DC] hover:border-[#8CCFB0] shadow-xs hover:shadow-md transition-all duration-200 cursor-pointer flex flex-col justify-between"
           >
             <div>
-              <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-4 group-hover:scale-110 transition-transform">
+              <div className="w-12 h-12 rounded-2xl bg-[#DDEFE3] border border-[#8CCFB0]/60 flex items-center justify-center text-[#247A63] mb-4 group-hover:scale-105 transition-transform">
                 <BarChart3 className="w-6 h-6" />
               </div>
-              <h3 className="text-lg font-bold text-white mb-2 group-hover:text-emerald-300 transition-colors">
+              <h3 className="text-lg font-bold text-[#1E332B] mb-2 group-hover:text-[#247A63] transition-colors">
                 Veri & Zaman Analizi
               </h3>
-              <p className="text-xs text-emerald-100/70 leading-relaxed mb-4">
+              <p className="text-xs text-[#556B62] leading-relaxed mb-4">
                 Yıllara göre gözlem dağılım grafikleri, zirve yılları, il ve bölge yoğunluk normalizasyonları.
               </p>
             </div>
-            <div className="flex items-center gap-1 text-xs font-bold text-emerald-400 group-hover:translate-x-1 transition-transform">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-[#247A63] group-hover:translate-x-1 transition-transform">
               <span>Analizleri İncele</span>
               <ArrowRight className="w-4 h-4" />
             </div>
@@ -167,20 +167,20 @@ export const HomePage: React.FC<HomePageProps> = ({
           {/* Tile 4: Conservation */}
           <div 
             onClick={() => navigate('/koruma')}
-            className="group bg-[#111e17] hover:bg-[#13241b] rounded-3xl p-6 border border-emerald-900/60 hover:border-emerald-500/60 shadow-xl transition-all duration-300 cursor-pointer flex flex-col justify-between"
+            className="group bg-white hover:bg-[#F9FCF8] rounded-3xl p-6 border border-[#D6E4DC] hover:border-[#8CCFB0] shadow-xs hover:shadow-md transition-all duration-200 cursor-pointer flex flex-col justify-between"
           >
             <div>
-              <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-4 group-hover:scale-110 transition-transform">
+              <div className="w-12 h-12 rounded-2xl bg-[#ECF6FA] border border-[#B9DDEB] flex items-center justify-center text-[#1B6884] mb-4 group-hover:scale-105 transition-transform">
                 <Shield className="w-6 h-6" />
               </div>
-              <h3 className="text-lg font-bold text-white mb-2 group-hover:text-emerald-300 transition-colors">
+              <h3 className="text-lg font-bold text-[#1E332B] mb-2 group-hover:text-[#247A63] transition-colors">
                 Koruma & IUCN Kılavuzu
               </h3>
-              <p className="text-xs text-emerald-100/70 leading-relaxed mb-4">
+              <p className="text-xs text-[#556B62] leading-relaxed mb-4">
                 Nesli tehlike altındaki türler, IUCN kırmızı liste kategorileri ve ekolojik koruma kriterleri.
               </p>
             </div>
-            <div className="flex items-center gap-1 text-xs font-bold text-emerald-400 group-hover:translate-x-1 transition-transform">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-[#247A63] group-hover:translate-x-1 transition-transform">
               <span>Rehberi Gör</span>
               <ArrowRight className="w-4 h-4" />
             </div>
@@ -189,20 +189,20 @@ export const HomePage: React.FC<HomePageProps> = ({
           {/* Tile 5: Compare */}
           <div 
             onClick={() => navigate('/karsilastir')}
-            className="group bg-[#111e17] hover:bg-[#13241b] rounded-3xl p-6 border border-emerald-900/60 hover:border-emerald-500/60 shadow-xl transition-all duration-300 cursor-pointer flex flex-col justify-between"
+            className="group bg-white hover:bg-[#F9FCF8] rounded-3xl p-6 border border-[#D6E4DC] hover:border-[#F3D9B5] shadow-xs hover:shadow-md transition-all duration-200 cursor-pointer flex flex-col justify-between"
           >
             <div>
-              <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-4 group-hover:scale-110 transition-transform">
+              <div className="w-12 h-12 rounded-2xl bg-[#FDF6EC] border border-[#F3D9B5] flex items-center justify-center text-[#9A631A] mb-4 group-hover:scale-105 transition-transform">
                 <Layers className="w-6 h-6" />
               </div>
-              <h3 className="text-lg font-bold text-white mb-2 group-hover:text-emerald-300 transition-colors">
+              <h3 className="text-lg font-bold text-[#1E332B] mb-2 group-hover:text-[#247A63] transition-colors">
                 Tür Karşılaştırma
               </h3>
-              <p className="text-xs text-emerald-100/70 leading-relaxed mb-4">
+              <p className="text-xs text-[#556B62] leading-relaxed mb-4">
                 İki farklı canlı türünün gözlem kayıtlarını ve bölgesel dağılımlarını yan yana kıyaslayın.
               </p>
             </div>
-            <div className="flex items-center gap-1 text-xs font-bold text-emerald-400 group-hover:translate-x-1 transition-transform">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-[#247A63] group-hover:translate-x-1 transition-transform">
               <span>Karşılaştır</span>
               <ArrowRight className="w-4 h-4" />
             </div>
@@ -211,7 +211,7 @@ export const HomePage: React.FC<HomePageProps> = ({
       </section>
 
       {/* Featured Species Discovery Showcase */}
-      <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-10">
+      <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-12">
         <SpeciesDiscovery
           onSelectSpecies={(sciName) => {
             onSearch(sciName, activeCountry);

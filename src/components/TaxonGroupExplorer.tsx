@@ -331,20 +331,28 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
   const getExistenceBadge = (status?: string) => {
     switch (status) {
       case 'LIVING':
-        return <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-950/80 border border-emerald-600/50 text-emerald-300">YAŞAYAN (LIVING)</span>;
+        return <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-[#DDEFE3]/95 border border-[#8CCFB0] text-[#1E5E4C] shadow-2xs">YAŞAYAN (LIVING)</span>;
       case 'FOSSIL_OR_EXTINCT':
-        return <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-950/80 border border-rose-600/50 text-rose-300">FOSİL / SOYU TÜKENMİŞ</span>;
+        return <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-rose-50/95 border border-rose-300 text-rose-800 shadow-2xs">FOSİL / SOYU TÜKENMİŞ</span>;
       case 'HISTORICAL_OR_UNCERTAIN':
-        return <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-950/80 border border-amber-600/50 text-amber-300">TARİHSEL / BELİRSİZ</span>;
+        return <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-[#FDF6EC]/95 border border-[#F3D9B5] text-[#7A4E16] shadow-2xs">TARİHSEL / BELİRSİZ</span>;
       default:
-        return <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-900 border border-slate-700 text-slate-300">DOĞRULANMIŞ</span>;
+        return <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-white/95 border border-[#D6E4DC] text-[#556B62] shadow-2xs">DOĞRULANMIŞ</span>;
     }
   };
 
   const getIucnBadge = (status?: string) => {
     if (!status || status === 'NE') return null;
+    const upper = status.toUpperCase();
+    let badgeTone = 'bg-white/95 border-[#D6E4DC] text-[#1E332B]';
+    if (upper === 'CR') badgeTone = 'bg-rose-50/95 border-rose-300 text-rose-800';
+    else if (upper === 'EN') badgeTone = 'bg-orange-50/95 border-orange-300 text-orange-800';
+    else if (upper === 'VU') badgeTone = 'bg-amber-50/95 border-amber-300 text-amber-800';
+    else if (upper === 'NT') badgeTone = 'bg-yellow-50/95 border-yellow-300 text-yellow-800';
+    else if (upper === 'LC') badgeTone = 'bg-[#DDEFE3]/95 border-[#8CCFB0] text-[#1E5E4C]';
+    else if (upper === 'EW') badgeTone = 'bg-purple-50/95 border-purple-300 text-purple-800';
     return (
-      <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-900 border border-slate-700 text-emerald-200">
+      <span className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold border shadow-2xs ${badgeTone}`}>
         IUCN: {status}
       </span>
     );
@@ -359,35 +367,33 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
   const activeGroupCandidate = groups.find(g => g.id === activeGroupId) || groups[0];
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 animate-fadeIn">
-      {/* Explorer Header Header */}
-      <div className="bg-[#111e17] rounded-3xl p-6 sm:p-8 border border-emerald-800/50 shadow-2xl mb-8 relative overflow-hidden">
-        <div className="absolute -right-12 -bottom-12 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
-        
+    <div className="max-w-7xl mx-auto py-2 animate-fadeIn">
+      {/* Explorer Header */}
+      <div className="bg-white rounded-3xl p-6 sm:p-8 border border-[#D6E4DC] shadow-sm mb-8 relative overflow-hidden">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 relative z-10">
           <div>
-            <div className="inline-flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-emerald-400 mb-2 bg-emerald-950/80 px-3 py-1 rounded-full border border-emerald-800/40">
+            <div className="inline-flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-[#247A63] font-semibold mb-2">
               <Compass className="w-3.5 h-3.5" />
               <span>GBIF Dinamik Taksonomik Keşif Sistemi</span>
             </div>
-            <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
+            <h1 className="text-3xl sm:text-4xl font-extrabold text-[#1E332B] tracking-tight">
               "{searchQuery}" — Canlı Grubu Keşfi
             </h1>
-            <p className="text-sm text-emerald-100/75 mt-2 max-w-2xl leading-relaxed">
+            <p className="text-sm text-[#556B62] mt-2 max-w-2xl leading-relaxed">
               Animalia alemi için GBIF Backbone üzerinden doğrulanan alt gruplar ve kabul edilmiş tür kataloğu (gözlem kapsamından bağımsız). Türkiye veya Global görünümünü değiştirerek gözlem sayılarını karşılaştırabilir, herhangi bir türe tıklayarak analiz sayfasını açabilirsiniz.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3 shrink-0">
             {/* Country Selector Toggle */}
-            <div className="flex items-center gap-1.5 p-1 bg-[#0b1510] rounded-xl border border-emerald-800/60">
+            <div className="flex items-center gap-1 p-1 bg-[#F5F9F4] rounded-xl border border-[#D6E4DC]">
               <button
                 type="button"
                 onClick={() => handleCountryToggle('TR')}
                 className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                   currentCountry === 'TR'
-                    ? 'bg-emerald-500 text-[#0b1510] shadow-md'
-                    : 'text-emerald-200/70 hover:text-white'
+                    ? 'bg-[#247A63] text-white shadow-xs'
+                    : 'text-[#556B62] hover:text-[#1E332B]'
                 }`}
               >
                 Türkiye (TR)
@@ -397,8 +403,8 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                 onClick={() => handleCountryToggle('')}
                 className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                   currentCountry === ''
-                    ? 'bg-emerald-500 text-[#0b1510] shadow-md'
-                    : 'text-emerald-200/70 hover:text-white'
+                    ? 'bg-[#247A63] text-white shadow-xs'
+                    : 'text-[#556B62] hover:text-[#1E332B]'
                 }`}
               >
                 Tüm Dünya (Global)
@@ -408,7 +414,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
             <button
               type="button"
               onClick={onBackToDefault}
-              className="px-4 py-2.5 bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-200 rounded-xl text-xs font-semibold border border-emerald-800/60 transition-colors flex items-center gap-2 cursor-pointer"
+              className="px-4 py-2.5 bg-[#F5F9F4] hover:bg-[#DDEFE3]/60 text-[#556B62] hover:text-[#1E332B] rounded-xl text-xs font-semibold border border-[#D6E4DC] transition-colors flex items-center gap-2 cursor-pointer"
             >
               <X className="w-4 h-4" />
               <span>Keşften Çık</span>
@@ -418,29 +424,29 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
 
         {/* Subgroups Navigation Tabs */}
         {groups.length > 0 && (
-          <div className="mt-8 pt-6 border-t border-emerald-900/60">
+          <div className="mt-8 pt-6 border-t border-[#E6EFEA]">
             {drillStack.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5 text-xs mb-4 bg-[#0b1510]/80 px-3.5 py-2 rounded-xl border border-emerald-800/40">
-                <span className="text-emerald-400/80 font-mono uppercase text-[10px] mr-1">Hiyerarşi:</span>
+              <div className="flex flex-wrap items-center gap-1.5 text-xs mb-4 bg-[#F5F9F4] px-3.5 py-2 rounded-xl border border-[#D6E4DC]">
+                <span className="text-[#247A63] font-mono uppercase text-[10px] font-bold mr-1">Hiyerarşi:</span>
                 {drillStack.map((crumb, idx) => (
                   <React.Fragment key={`${crumb.activeGroupId}-${idx}`}>
                     <button
                       type="button"
                       onClick={() => handleDrillBreadcrumbBack(idx)}
-                      className="text-emerald-300 hover:text-white underline underline-offset-2 font-medium cursor-pointer"
+                      className="text-[#247A63] hover:text-[#1D6350] underline underline-offset-2 font-semibold cursor-pointer"
                     >
                       {crumb.label}
                     </button>
-                    <ChevronRight className="w-3.5 h-3.5 text-emerald-600" />
+                    <ChevronRight className="w-3.5 h-3.5 text-[#556B62]" />
                   </React.Fragment>
                 ))}
-                <span className="text-white font-semibold">{groups[0]?.scientificName || activeGroupCandidate?.scientificName}</span>
+                <span className="text-[#1E332B] font-bold">{groups[0]?.scientificName || activeGroupCandidate?.scientificName}</span>
               </div>
             )}
 
             <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-              <div className="flex items-center gap-2 text-xs font-semibold text-emerald-300/80">
-                <Layers className="w-4 h-4 text-emerald-400" />
+              <div className="flex items-center gap-2 text-xs font-semibold text-[#556B62]">
+                <Layers className="w-4 h-4 text-[#247A63]" />
                 <span>
                   {subgroupMeta?.hasMore
                     ? `Doğrulanmış Alt Gruplar (${displayGroups.length}+ yüklendi${
@@ -459,9 +465,9 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                   type="button"
                   disabled={isDrillingDown || isLoadingSpecies}
                   onClick={() => handleDrillDownSubgroup(activeGroupCandidate)}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-950/90 hover:bg-emerald-800/70 disabled:opacity-50 text-emerald-200 hover:text-white border border-emerald-700/60 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  className="px-3 py-1.5 rounded-lg bg-[#DDEFE3] hover:bg-[#247A63] disabled:opacity-50 text-[#1E332B] hover:text-white border border-[#8CCFB0] text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
-                  <Layers className="w-3.5 h-3.5 text-emerald-400" />
+                  <Layers className="w-3.5 h-3.5" />
                   <span>{isDrillingDown ? 'Alt Gruplar Yükleniyor...' : 'Bu Alt Grubu Daha Detaylı Böl'}</span>
                   <ChevronRight className="w-3.5 h-3.5" />
                 </button>
@@ -478,21 +484,21 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                     onClick={() => handleSubgroupChange(g.id)}
                     className={`px-4 py-2.5 rounded-xl text-xs font-semibold transition-all whitespace-nowrap flex items-center gap-2 cursor-pointer ${
                       isActive
-                        ? 'bg-emerald-500 text-[#0b1510] shadow-lg shadow-emerald-500/20 font-bold'
-                        : 'bg-[#0b1510] text-emerald-200/80 hover:text-white hover:bg-[#13241b] border border-emerald-800/60'
+                        ? 'bg-[#247A63] text-white shadow-xs font-bold'
+                        : 'bg-[#F5F9F4] text-[#1E332B] hover:bg-[#DDEFE3]/70 border border-[#D6E4DC]'
                     }`}
                   >
                     <span>{g.label}</span>
                     {g.isExtinct && (
                       <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
-                        isActive ? 'bg-[#0b1510]/20 text-[#0b1510]' : 'bg-rose-950/80 text-rose-300 border border-rose-700/40'
+                        isActive ? 'bg-white/20 text-white' : 'bg-rose-50 text-rose-700 border border-rose-200'
                       }`}>
                         FOSİL
                       </span>
                     )}
                     {g.scientificName && !g.label.includes(g.scientificName) && (
                       <span className={`text-[10px] italic font-serif px-1.5 py-0.5 rounded ${
-                        isActive ? 'bg-[#0b1510]/20 text-[#0b1510]' : 'bg-emerald-950 text-emerald-400'
+                        isActive ? 'bg-white/20 text-white' : 'bg-white text-[#247A63] border border-[#D6E4DC]'
                       }`}>
                         {g.scientificName}
                       </span>
@@ -507,7 +513,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                     type="button"
                     disabled={isLoadingMoreSubgroups}
                     onClick={() => handleRevealMoreSubgroups(false)}
-                    className="px-3.5 py-2.5 rounded-xl text-xs font-semibold whitespace-nowrap bg-emerald-950/90 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                    className="px-3.5 py-2.5 rounded-xl text-xs font-semibold whitespace-nowrap bg-[#DDEFE3] hover:bg-[#8CCFB0]/60 text-[#1E332B] border border-[#8CCFB0] transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
                   >
                     <ChevronDown className="w-3.5 h-3.5" />
                     <span>
@@ -523,7 +529,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                       type="button"
                       disabled={isLoadingMoreSubgroups}
                       onClick={() => handleRevealMoreSubgroups(true)}
-                      className="px-3.5 py-2.5 rounded-xl text-xs font-medium whitespace-nowrap bg-[#0b1510] hover:bg-[#13241b] text-emerald-300/80 hover:text-white border border-emerald-800/60 transition-colors cursor-pointer disabled:opacity-60"
+                      className="px-3.5 py-2.5 rounded-xl text-xs font-medium whitespace-nowrap bg-[#F5F9F4] hover:bg-[#DDEFE3]/50 text-[#556B62] hover:text-[#1E332B] border border-[#D6E4DC] transition-colors cursor-pointer disabled:opacity-60"
                     >
                       {isLoadingMoreSubgroups
                         ? 'Eksik Alt Gruplar Getiriliyor...'
@@ -539,7 +545,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
             </div>
 
             {(subgroupMeta?.hasMore || subgroupMeta?.hasError || subgroupMeta?.offsetLimitReached || hiddenExtinctSubgroupCount > 0) && (
-              <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-200/90 bg-amber-950/30 border border-amber-800/40 rounded-xl px-3.5 py-2">
+              <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#6E4716] bg-[#FDF6EC] border border-[#F3D9B5] rounded-xl px-3.5 py-2">
                 <span>
                   {subgroupMeta?.hasError
                     ? `Alt grup listesi GBIF hatası nedeniyle eksik kaldı (${subgroupMeta.errorMessage || 'geçici sunucu hatası'}).`
@@ -554,7 +560,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                     type="button"
                     disabled={isLoadingMoreSubgroups}
                     onClick={() => handleRevealMoreSubgroups(false)}
-                    className="px-2.5 py-1 rounded-lg bg-amber-800/70 hover:bg-amber-700 text-white font-semibold cursor-pointer disabled:opacity-50"
+                    className="px-2.5 py-1 rounded-lg bg-[#247A63] hover:bg-[#1D6350] text-white font-semibold cursor-pointer disabled:opacity-50"
                   >
                     Tekrar Dene
                   </button>
@@ -567,39 +573,39 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
 
       {/* Main Content Area */}
       {isLoadingIntent ? (
-        <div className="py-24 flex flex-col items-center justify-center text-center bg-[#111e17]/50 rounded-3xl border border-emerald-900/40">
+        <div className="py-24 flex flex-col items-center justify-center text-center bg-white rounded-3xl border border-[#D6E4DC] shadow-xs">
           <div className="relative w-16 h-16 mb-4">
-            <div className="absolute inset-0 rounded-full border-4 border-emerald-900/60 border-t-emerald-400 animate-spin" />
-            <Compass className="w-8 h-8 text-emerald-400 absolute inset-0 m-auto" />
+            <div className="absolute inset-0 rounded-full border-4 border-[#DDEFE3] border-t-[#247A63] animate-spin" />
+            <Compass className="w-8 h-8 text-[#247A63] absolute inset-0 m-auto" />
           </div>
-          <h3 className="text-xl font-bold text-white mb-2">
+          <h3 className="text-xl font-bold text-[#1E332B] mb-2">
             GBIF Backbone Dinamik Taksonomisi Taranıyor
           </h3>
-          <p className="text-xs text-emerald-300/70 max-w-sm">
+          <p className="text-xs text-[#556B62] max-w-sm">
             "{searchQuery}" için Animalia üst taksonları doğrulanıyor ve alt gruplar listeleniyor...
           </p>
         </div>
       ) : errorMessage && !discoveryResult ? (
         <div
-          className={`p-8 rounded-3xl border flex flex-col items-center justify-center text-center ${
+          className={`p-8 rounded-3xl border flex flex-col items-center justify-center text-center shadow-xs ${
             errorType === 'ERROR'
-              ? 'bg-amber-950/40 border-amber-700/50'
-              : 'bg-rose-950/40 border-rose-700/50'
+              ? 'bg-[#FDF6EC] border-[#F3D9B5]'
+              : 'bg-rose-50 border-rose-200'
           }`}
         >
           <AlertCircle
-            className={`w-12 h-12 mb-3 ${errorType === 'ERROR' ? 'text-amber-400' : 'text-rose-400'}`}
+            className={`w-12 h-12 mb-3 ${errorType === 'ERROR' ? 'text-amber-700' : 'text-rose-600'}`}
           />
           <h3
             className={`text-lg font-bold mb-1 ${
-              errorType === 'ERROR' ? 'text-amber-200' : 'text-rose-200'
+              errorType === 'ERROR' ? 'text-[#6E4716]' : 'text-rose-900'
             }`}
           >
             {errorType === 'ERROR' ? 'Veri Kaynağına Erişilemedi' : 'Sonuç Bulunamadı'}
           </h3>
           <p
             className={`text-sm max-w-md mb-6 ${
-              errorType === 'ERROR' ? 'text-amber-200/90' : 'text-rose-200/90'
+              errorType === 'ERROR' ? 'text-[#6E4716]/90' : 'text-rose-800'
             }`}
           >
             {errorMessage}
@@ -609,7 +615,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
               <button
                 type="button"
                 onClick={() => loadGroupIntent(searchQuery, currentCountry)}
-                className="px-5 py-2.5 bg-amber-800/70 hover:bg-amber-700/80 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                className="px-5 py-2.5 bg-[#247A63] hover:bg-[#1D6350] text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
               >
                 Tekrar Dene
               </button>
@@ -617,10 +623,10 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
             <button
               type="button"
               onClick={onBackToDefault}
-              className={`px-5 py-2.5 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
+              className={`px-5 py-2.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
                 errorType === 'ERROR'
-                  ? 'bg-[#13241b] hover:bg-emerald-950 border border-emerald-800/50'
-                  : 'bg-rose-900/60 hover:bg-rose-800'
+                  ? 'bg-white hover:bg-[#F5F9F4] text-[#1E332B] border border-[#D6E4DC]'
+                  : 'bg-rose-700 hover:bg-rose-800 text-white'
               }`}
             >
               Ana Sayfaya Dön
@@ -630,27 +636,29 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
       ) : (
         <div className="space-y-6">
           {/* Status HUD / Info Bar */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#111e17] px-6 py-4 rounded-2xl border border-emerald-900/60">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white px-6 py-4 rounded-2xl border border-[#D6E4DC] shadow-2xs">
             <div className="flex items-center gap-3">
-              <Database className="w-5 h-5 text-emerald-400 shrink-0" />
+              <div className="w-9 h-9 rounded-xl bg-[#ECF6FA] border border-[#B9DDEB] flex items-center justify-center text-[#1B6884] shrink-0">
+                <Database className="w-4 h-4" />
+              </div>
               <div>
-                <h4 className="text-sm font-bold text-white">
+                <h4 className="text-sm font-bold text-[#1E332B]">
                   {activeGroupCandidate?.label || searchQuery}
                 </h4>
-                <p className="text-xs text-emerald-300/70">
+                <p className="text-xs text-[#556B62]">
                   {discoveryResult?.dataQualityNotice || 'Doğrulanmış tür arşivi listeleniyor.'}
                 </p>
               </div>
             </div>
 
             {/* Fossil Toggle */}
-            <div className="flex items-center gap-2 text-xs font-medium text-emerald-200 shrink-0">
+            <div className="flex items-center gap-2 text-xs font-medium text-[#1E332B] shrink-0">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={includeFossil}
                   onChange={(e) => handleFossilToggle(e.target.checked)}
-                  className="rounded bg-[#0b1510] border-emerald-700 text-emerald-500 focus:ring-0 cursor-pointer"
+                  className="rounded border-[#8CCFB0] text-[#247A63] focus:ring-[#247A63] cursor-pointer"
                 />
                 <span>Fosil / Soyu Tükenmişleri de Göster</span>
               </label>
@@ -659,9 +667,9 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
 
           {/* Species Cards Grid */}
           {isLoadingSpecies ? (
-            <div className="py-20 flex flex-col items-center justify-center text-center">
-              <div className="w-8 h-8 border-3 border-emerald-900 border-t-emerald-400 rounded-full animate-spin mb-3" />
-              <p className="text-xs text-emerald-300/70">Seçilen gruptaki türler yükleniyor...</p>
+            <div className="py-20 flex flex-col items-center justify-center text-center bg-white rounded-3xl border border-[#D6E4DC]">
+              <div className="w-8 h-8 border-3 border-[#DDEFE3] border-t-[#247A63] rounded-full animate-spin mb-3" />
+              <p className="text-xs text-[#556B62]">Seçilen gruptaki türler yükleniyor...</p>
             </div>
           ) : discoveryResult?.species && discoveryResult.species.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -672,12 +680,12 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                 <div
                   key={itemKey}
                   onClick={() => onSelectSpecies(item.canonicalName, currentCountry, item.turkishName)}
-                  className="group bg-[#111e17] hover:bg-[#13241b] rounded-2xl p-5 border border-emerald-900/60 hover:border-emerald-600/60 shadow-lg transition-all duration-300 flex flex-col justify-between cursor-pointer relative overflow-hidden"
+                  className="group bg-white hover:bg-[#F9FCF8] rounded-2xl p-5 border border-[#D6E4DC] hover:border-[#8CCFB0] shadow-xs hover:shadow-md transition-all duration-200 flex flex-col justify-between cursor-pointer relative overflow-hidden"
                 >
                   <div>
                     {/* Thumbnail Image or Clean Visual Placeholder */}
                     {item.photoUrl && !failedPhotoUrls[item.photoUrl] ? (
-                      <div className="w-full h-36 rounded-xl overflow-hidden mb-4 bg-emerald-950/40 relative">
+                      <div className="w-full h-40 rounded-xl overflow-hidden mb-4 bg-[#F5F9F4] border border-[#E6EFEA] relative">
                         <img
                           src={item.photoUrl}
                           alt={item.turkishName || item.canonicalName}
@@ -685,7 +693,6 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                           referrerPolicy="no-referrer"
                           onError={() => markPhotoFailed(item.photoUrl)}
                         />
-                        <div className="absolute inset-0 bg-gradient-to-t from-[#111e17] via-transparent to-transparent opacity-80" />
                         <div className="absolute top-2 left-2">
                           {getIucnBadge(item.iucnStatus)}
                         </div>
@@ -694,28 +701,28 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                         </div>
                       </div>
                     ) : isCheckingPhoto ? (
-                      <div className="w-full h-36 rounded-xl mb-4 bg-[#0b1510]/85 border border-emerald-900/50 relative flex flex-col items-center justify-center p-3 text-center">
+                      <div className="w-full h-40 rounded-xl mb-4 bg-[#F5F9F4] border border-[#D6E4DC] relative flex flex-col items-center justify-center p-3 text-center">
                         <div className="absolute top-2 left-2">
                           {getIucnBadge(item.iucnStatus)}
                         </div>
                         <div className="absolute top-2 right-2">
                           {getExistenceBadge(item.existenceStatus)}
                         </div>
-                        <div className="w-5 h-5 border-2 border-emerald-900 border-t-emerald-400 rounded-full animate-spin mb-2 mt-4" />
-                        <span className="text-[11px] font-medium text-emerald-300/65">
+                        <div className="w-5 h-5 border-2 border-[#DDEFE3] border-t-[#247A63] rounded-full animate-spin mb-2 mt-4" />
+                        <span className="text-[11px] font-medium text-[#556B62]">
                           Görsel kontrol ediliyor...
                         </span>
                       </div>
                     ) : (
-                      <div className="w-full h-36 rounded-xl mb-4 bg-[#0b1510]/85 border border-emerald-900/50 relative flex flex-col items-center justify-center p-3 text-center">
+                      <div className="w-full h-40 rounded-xl mb-4 bg-[#F5F9F4] border border-[#D6E4DC] relative flex flex-col items-center justify-center p-3 text-center">
                         <div className="absolute top-2 left-2">
                           {getIucnBadge(item.iucnStatus)}
                         </div>
                         <div className="absolute top-2 right-2">
                           {getExistenceBadge(item.existenceStatus)}
                         </div>
-                        <ImageOff className="w-6 h-6 text-emerald-500/45 mb-1.5 mt-4" />
-                        <span className="text-[11px] font-medium text-emerald-200/55">
+                        <ImageOff className="w-6 h-6 text-[#556B62]/45 mb-1.5 mt-4" />
+                        <span className="text-[11px] font-medium text-[#556B62]">
                           Görsel kaydı bulunamadı
                         </span>
                       </div>
@@ -723,30 +730,30 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
 
                     {/* Names */}
                     <div className="mb-3">
-                      <h3 className="text-base font-bold text-white group-hover:text-emerald-300 transition-colors line-clamp-1">
+                      <h3 className="text-base font-bold text-[#1E332B] group-hover:text-[#247A63] transition-colors line-clamp-1">
                         {item.turkishName || item.canonicalName}
                       </h3>
-                      <p className="text-xs italic font-serif text-emerald-300/80">
+                      <p className="text-xs italic font-serif text-[#556B62]">
                         {item.scientificName}
                       </p>
                     </div>
 
                     {/* Evidence / Note */}
-                    <p className="text-[11px] text-emerald-100/70 leading-relaxed line-clamp-2 mb-4">
+                    <p className="text-[11px] text-[#556B62] leading-relaxed line-clamp-2 mb-4">
                       {item.existenceEvidence || item.membershipEvidence || 'GBIF Backbone onaylı tür.'}
                     </p>
                   </div>
 
                   {/* Footer Stats & Action */}
-                  <div className="pt-3 border-t border-emerald-900/40 flex items-center justify-between gap-2 text-xs">
+                  <div className="pt-3 border-t border-[#E6EFEA] flex items-center justify-between gap-2 text-xs">
                     <div className="flex flex-col">
                       {item.gbifRecordStatus === 'ERROR' ? (
                         <>
-                          <span className="font-semibold text-[11px] text-rose-300/90">
+                          <span className="font-semibold text-[11px] text-rose-700">
                             Veri alınamadı (GBIF)
                           </span>
                           {currentCountry === 'TR' && (
-                            <span className="font-mono text-[10px] mt-0.5 text-emerald-300/70">
+                            <span className="font-mono text-[10px] mt-0.5 text-[#556B62]">
                               {item.globalRecordStatus === 'ERROR'
                                 ? 'Global: Veri alınamadı'
                                 : typeof item.globalRecordCount === 'number'
@@ -758,37 +765,37 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                       ) : currentCountry === 'TR' ? (
                         item.gbifRecordCount === 0 ? (
                           <>
-                            <span className="font-semibold text-[11px] text-amber-300/90">
+                            <span className="font-semibold text-[11px] text-[#9A631A]">
                               Türkiye'de GBIF gözlem kaydı yok
                             </span>
                             {item.globalRecordStatus === 'ERROR' ? (
-                              <span className="font-mono text-[10px] text-rose-300/80 mt-0.5">
+                              <span className="font-mono text-[10px] text-rose-700 mt-0.5">
                                 Global: Veri alınamadı
                               </span>
                             ) : typeof item.globalRecordCount === 'number' && (
-                              <span className="font-mono text-[10px] text-emerald-300/75 mt-0.5">
+                              <span className="font-mono text-[10px] text-[#556B62] mt-0.5">
                                 Global: {item.globalRecordCount.toLocaleString('tr-TR')} gözlem
                               </span>
                             )}
                           </>
                         ) : (
                           <>
-                            <span className="font-mono text-[11px] text-emerald-400 font-bold">
+                            <span className="font-mono text-[11px] text-[#247A63] font-bold">
                               {item.gbifRecordCount.toLocaleString('tr-TR')} TR Gözlemi
                             </span>
                             {item.globalRecordStatus === 'ERROR' ? (
-                              <span className="font-mono text-[10px] text-rose-300/80 mt-0.5">
+                              <span className="font-mono text-[10px] text-rose-700 mt-0.5">
                                 Global: Veri alınamadı
                               </span>
                             ) : typeof item.globalRecordCount === 'number' && (
-                              <span className="font-mono text-[10px] text-emerald-300/70 mt-0.5">
+                              <span className="font-mono text-[10px] text-[#556B62] mt-0.5">
                                 Global: {item.globalRecordCount.toLocaleString('tr-TR')} gözlem
                               </span>
                             )}
                           </>
                         )
                       ) : (
-                        <span className={`font-mono text-[11px] font-bold ${item.gbifRecordCount === 0 ? 'text-amber-300/90 font-semibold font-sans' : 'text-emerald-400'}`}>
+                        <span className={`font-mono text-[11px] font-bold ${item.gbifRecordCount === 0 ? 'text-[#9A631A] font-semibold font-sans' : 'text-[#247A63]'}`}>
                           {item.gbifRecordCount === 0
                             ? "GBIF'te gözlem kaydı yok"
                             : `${item.gbifRecordCount.toLocaleString('tr-TR')} Global Gözlem`}
@@ -796,7 +803,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                       )}
                     </div>
 
-                    <span className="text-emerald-400 group-hover:text-white font-medium flex items-center gap-1 shrink-0">
+                    <span className="text-[#247A63] group-hover:text-[#1D6350] font-semibold flex items-center gap-1 shrink-0">
                       <span>Analiz Et</span>
                       <ArrowUpRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
                     </span>
@@ -806,27 +813,27 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
               })}
             </div>
           ) : discoveryResult?.catalogErrorMessage ? (
-            <div className="py-16 px-6 flex flex-col items-center justify-center text-center bg-amber-950/25 rounded-2xl border border-amber-700/50">
-              <AlertCircle className="w-10 h-10 text-amber-400 mb-3" />
-              <h4 className="text-base font-bold text-amber-200 mb-1">
+            <div className="py-16 px-6 flex flex-col items-center justify-center text-center bg-[#FDF6EC] rounded-2xl border border-[#F3D9B5]">
+              <AlertCircle className="w-10 h-10 text-amber-700 mb-3" />
+              <h4 className="text-base font-bold text-[#6E4716] mb-1">
                 Veri Kaynağına Erişilemedi
               </h4>
-              <p className="text-xs text-amber-200/85 max-w-md mb-4">
+              <p className="text-xs text-[#6E4716]/90 max-w-md mb-4">
                 {discoveryResult.catalogErrorMessage}
               </p>
               <button
                 type="button"
                 onClick={() => handlePageChange(currentPage)}
-                className="px-4 py-2 bg-amber-800/70 hover:bg-amber-700 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                className="px-4 py-2 bg-[#247A63] hover:bg-[#1D6350] text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
               >
                 Tekrar Dene
               </button>
             </div>
           ) : (
-            <div className="py-20 flex flex-col items-center justify-center text-center bg-[#111e17]/40 rounded-2xl border border-emerald-900/40">
-              <HelpCircle className="w-10 h-10 text-emerald-400/60 mb-3" />
-              <h4 className="text-base font-bold text-white mb-1">Bu Grupta Tür Bulunamadı</h4>
-              <p className="text-xs text-emerald-300/70 max-w-sm mb-4">
+            <div className="py-20 flex flex-col items-center justify-center text-center bg-white rounded-2xl border border-[#D6E4DC]">
+              <HelpCircle className="w-10 h-10 text-[#247A63]/60 mb-3" />
+              <h4 className="text-base font-bold text-[#1E332B] mb-1">Bu Grupta Tür Bulunamadı</h4>
+              <p className="text-xs text-[#556B62] max-w-sm mb-4">
                 Seçilen alt grup için {currentCountry === 'TR' ? 'Türkiye' : 'Global'} sınırları içinde doğrulanmış kayıt bulunamadı veya filtrelendi.
               </p>
               <div className="flex flex-wrap items-center justify-center gap-3">
@@ -834,7 +841,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                   <button
                     type="button"
                     onClick={() => handleCountryToggle('')}
-                    className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-[#0b1510] rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer"
+                    className="px-4 py-2 bg-[#247A63] hover:bg-[#1D6350] text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
                     <Globe2 className="w-3.5 h-3.5" />
                     <span>Tüm Dünya (Global) Kayıtlarını Göster</span>
@@ -844,7 +851,7 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                   <button
                     type="button"
                     onClick={() => handleFossilToggle(true)}
-                    className="px-4 py-2 bg-emerald-800 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                    className="px-4 py-2 bg-[#DDEFE3] hover:bg-[#8CCFB0]/60 text-[#1E332B] border border-[#8CCFB0] rounded-xl text-xs font-semibold transition-colors cursor-pointer"
                   >
                     Fosil Kayıtları Dahil Et
                   </button>
@@ -855,51 +862,51 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
 
           {/* Catalog Server / Request Error Notice (distinct from 100k offset limit) */}
           {discoveryResult?.catalogErrorMessage && discoveryResult.species.length > 0 && (
-            <div className="p-3.5 rounded-xl bg-rose-950/40 border border-rose-700/50 text-xs text-rose-200 flex items-start gap-2.5">
-              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
               <span>{discoveryResult.catalogErrorMessage}</span>
             </div>
           )}
 
           {/* 100k Offset Limit Notice */}
           {discoveryResult?.offsetLimitReached && (
-            <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-700/50 text-xs text-amber-200 flex items-start gap-2.5">
-              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="p-3.5 rounded-xl bg-[#FDF6EC] border border-[#F3D9B5] text-xs text-[#6E4716] flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-[#9A631A] shrink-0 mt-0.5" />
               <span>
-                GBIF <code className="font-mono text-amber-300">/v1/species/search</code> servisinin 100.000 kayıtlık sayfalama sınırına ulaşıldı. Şimdiye kadar getirilen kayıtlar korundu; daha derindeki türleri görmek için yukarıdaki alt gruplara bölerek taramayı daraltabilirsiniz.
+                GBIF <code className="font-mono font-semibold text-[#59380D]">/v1/species/search</code> servisinin 100.000 kayıtlık sayfalama sınırına ulaşıldı. Şimdiye kadar getirilen kayıtlar korundu; daha derindeki türleri görmek için yukarıdaki alt gruplara bölerek taramayı daraltabilirsiniz.
               </span>
             </div>
           )}
 
           {/* Pagination Controls */}
           {discoveryResult?.pagination && discoveryResult.pagination.totalDiscovered > 0 && (
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-6 border-t border-emerald-900/60 text-xs">
-              <span className="text-emerald-300/75">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-6 border-t border-[#D6E4DC] text-xs">
+              <span className="text-[#556B62]">
                 {typeof discoveryResult.pagination.filteredCatalogCount === 'number' ? (
                   <>
                     Filtrelenmiş katalogda toplam{' '}
-                    <strong className="text-white">
+                    <strong className="text-[#1E332B]">
                       {discoveryResult.pagination.filteredCatalogCount.toLocaleString('tr-TR')}
                     </strong>{' '}
                     tür (GBIF Backbone ham eşleşmesi:{' '}
                     {(discoveryResult.pagination.backboneMatchCount ?? discoveryResult.pagination.filteredCatalogCount).toLocaleString('tr-TR')}) · Bu sayfada{' '}
-                    <strong className="text-emerald-300">{discoveryResult.species.length}</strong> tür (Sayfa {currentPage}).
+                    <strong className="text-[#247A63]">{discoveryResult.species.length}</strong> tür (Sayfa {currentPage}).
                   </>
                 ) : (discoveryResult.pagination.backboneMatchCount ?? discoveryResult.pagination.backboneTotalCount ?? 0) > 0 ? (
                   <>
                     GBIF Backbone ham sorgu eşleşmesi:{' '}
-                    <strong className="text-white">
+                    <strong className="text-[#1E332B]">
                       ~{(discoveryResult.pagination.backboneMatchCount ?? discoveryResult.pagination.backboneTotalCount ?? 0).toLocaleString('tr-TR')}
                     </strong>{' '}
                     tür · Şu ana kadar doğrulanan havuz:{' '}
-                    <strong className="text-emerald-300">
+                    <strong className="text-[#247A63]">
                       {discoveryResult.pagination.totalDiscovered.toLocaleString('tr-TR')}
                     </strong>{' '}
                     (Bu sayfada {discoveryResult.species.length} tür, Sayfa {currentPage}).
                   </>
                 ) : (
                   <>
-                    Toplam <strong className="text-white">{discoveryResult.pagination.totalDiscovered.toLocaleString('tr-TR')}</strong> doğrulanmış tür keşfedildi (Sayfa {currentPage}).
+                    Toplam <strong className="text-[#1E332B]">{discoveryResult.pagination.totalDiscovered.toLocaleString('tr-TR')}</strong> doğrulanmış tür keşfedildi (Sayfa {currentPage}).
                   </>
                 )}
               </span>
@@ -909,18 +916,18 @@ export const TaxonGroupExplorer: React.FC<TaxonGroupExplorerProps> = ({
                   type="button"
                   disabled={currentPage <= 1 || isLoadingSpecies}
                   onClick={() => handlePageChange(currentPage - 1)}
-                  className="px-3.5 py-2 rounded-xl bg-[#111e17] hover:bg-[#13241b] disabled:opacity-40 text-emerald-200 border border-emerald-800/60 transition-colors cursor-pointer disabled:cursor-not-allowed"
+                  className="px-3.5 py-2 rounded-xl bg-white hover:bg-[#DDEFE3]/60 disabled:opacity-40 text-[#1E332B] border border-[#D6E4DC] transition-colors cursor-pointer disabled:cursor-not-allowed font-medium"
                 >
                   Önceki Sayfa
                 </button>
-                <span className="px-3 py-2 font-mono font-bold text-white bg-emerald-950/60 rounded-xl border border-emerald-800/40">
+                <span className="px-3 py-2 font-mono font-bold text-white bg-[#247A63] rounded-xl">
                   {currentPage}
                 </span>
                 <button
                   type="button"
                   disabled={!discoveryResult.pagination.hasMore || isLoadingSpecies}
                   onClick={() => handlePageChange(currentPage + 1)}
-                  className="px-3.5 py-2 rounded-xl bg-[#111e17] hover:bg-[#13241b] disabled:opacity-40 text-emerald-200 border border-emerald-800/60 transition-colors cursor-pointer disabled:cursor-not-allowed"
+                  className="px-3.5 py-2 rounded-xl bg-white hover:bg-[#DDEFE3]/60 disabled:opacity-40 text-[#1E332B] border border-[#D6E4DC] transition-colors cursor-pointer disabled:cursor-not-allowed font-medium"
                 >
                   Sonraki Sayfa
                 </button>
